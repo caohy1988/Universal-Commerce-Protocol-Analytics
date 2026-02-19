@@ -82,6 +82,9 @@ async def shutdown():
     await tracker.close()
 ```
 
+> **Note:** `UCPAnalyticsMiddleware` requires the `[fastapi]` extra.
+> The middleware is lazy-loaded so the core package works without starlette installed.
+
 ### Agent / platform client (HTTPX)
 
 ```python
@@ -94,7 +97,7 @@ hook = UCPClientEventHook(tracker)
 client = httpx.AsyncClient(event_hooks={"response": [hook]})
 ```
 
-Every call to `/checkout-sessions`, `/.well-known/ucp`, `/orders`, etc.
+Every call to `/checkout-sessions`, `/.well-known/ucp`, `/orders`, `/carts`, etc.
 is automatically classified and written to BigQuery.
 
 ## Events Tracked
@@ -110,7 +113,13 @@ Events are auto-classified from HTTP method + path + response status:
 | `POST /checkout-sessions/{id}/complete` | `checkout_session_completed` |
 | `POST /checkout-sessions/{id}/cancel` | `checkout_session_canceled` |
 | `GET /checkout-sessions/{id}` | `checkout_session_get` |
-| Order webhooks | `order_created`, `order_shipped`, … |
+| `POST /carts` | `cart_created` |
+| `GET /carts/{id}` | `cart_get` |
+| `PUT /carts/{id}` | `cart_updated` |
+| `POST /carts/{id}/cancel` | `cart_canceled` |
+| `POST /orders` | `order_created` |
+| `GET /orders/{id}` | `order_updated` |
+| Any unmatched path, status >= 400 | `error` |
 
 ## Configuration
 
@@ -127,12 +136,51 @@ UCPAnalyticsTracker(
 )
 ```
 
+The underlying `AsyncBigQueryWriter` also accepts `max_buffer_size`
+(default: 10,000) to cap in-memory buffering when BigQuery is unreachable.
+
+**BigQuery schema notes (v0.2 spec alignment):** The schema uses `fulfillment_amount`
+(replacing the earlier `shipping_amount`) to align with UCP spec total types. Additional
+fields include `items_discount_amount`, `fee_amount`, `discount_codes_json`,
+`discount_applied_json` (discount extension), `expires_at`, `continue_url`
+(checkout metadata), and `permalink_url` (order permalink).
+
 ## Dashboard Queries
 
 See [`dashboards/queries.sql`](dashboards/queries.sql) for 10 ready-to-use
 BigQuery queries: checkout funnel, revenue by merchant, payment handler mix,
 capability adoption, error analysis, escalation rate, latency percentiles,
 fulfillment geography, session timeline, and discovery-to-checkout rate.
+
+## Repository Structure
+
+```
+Universal-Commerce-Protocol-Analytics/
+├── .github/workflows/ci.yml       # ruff lint + pytest (py 3.10-3.12)
+├── src/ucp_analytics/
+│   ├── __init__.py                 # public API exports (lazy-loads middleware)
+│   ├── events.py                   # UCPEvent, UCPEventType, CheckoutStatus
+│   ├── parser.py                   # classify HTTP→event, extract fields
+│   ├── writer.py                   # AsyncBigQueryWriter (batch + DDL)
+│   ├── tracker.py                  # UCPAnalyticsTracker (orchestrator)
+│   ├── middleware.py               # FastAPI/Starlette ASGI middleware
+│   ├── client_hooks.py             # HTTPX event hook for agent clients
+│   └── adk_plugin.py              # optional ADK BasePlugin adapter
+├── tests/
+│   ├── test_parser.py              # classify + extract unit tests
+│   ├── test_events.py              # UCPEvent + enum tests
+│   ├── test_tracker.py             # tracker + PII redaction tests
+│   ├── test_writer.py              # buffer, flush, retry, DDL tests
+│   └── test_client_hooks.py        # HTTPX hook tests
+├── examples/
+│   ├── e2e_demo.py                 # Self-contained E2E demo (no GCP)
+│   └── flower_shop_analytics.py    # Integration with UCP samples server
+├── dashboards/queries.sql          # 10 BigQuery analytics queries
+├── docs/design_doc.md              # Design document
+├── pyproject.toml                  # hatchling + uv + ruff
+└── LICENSE                         # Apache 2.0
+```
+
 
 ## Contributing
 
