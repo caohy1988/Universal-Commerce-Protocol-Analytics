@@ -1,0 +1,388 @@
+"""Parse UCP JSON responses into structured analytics fields.
+
+Understands the checkout object schema, totals array, payment instruments,
+fulfillment extension, discount extension, messages array, and the
+ucp metadata envelope.
+
+Aligned with the official UCP specification at
+https://github.com/Universal-Commerce-Protocol/ucp
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from typing import Any, Dict, Optional
+
+from ucp_analytics.events import UCPEventType
+
+
+class UCPResponseParser:
+    """Extract analytics-relevant fields from UCP request/response bodies."""
+
+    # ------------------------------------------------------------------ #
+    # Classify event type from HTTP method + path + body
+    # ------------------------------------------------------------------ #
+
+    @classmethod
+    def classify(
+        cls,
+        method: str,
+        path: str,
+        status_code: int,
+        response_body: Optional[dict],
+    ) -> UCPEventType:
+        """Derive the UCP event type from the HTTP request + response."""
+        m = method.upper()
+        p = path.rstrip("/")
+
+        # /.well-known/ucp  →  discovery
+        if p.endswith("/.well-known/ucp"):
+            return UCPEventType.PROFILE_DISCOVERED
+
+        # /checkout-sessions  POST  → created
+        if re.search(r"/checkout-sessions/?$", p) and m == "POST":
+            return UCPEventType.CHECKOUT_SESSION_CREATED
+
+        # /checkout-sessions/{id}/complete  POST  → completed
+        if re.search(r"/checkout-sessions/[^/]+/complete$", p) and m == "POST":
+            return UCPEventType.CHECKOUT_SESSION_COMPLETED
+
+        # /checkout-sessions/{id}/cancel  POST  → canceled
+        if re.search(r"/checkout-sessions/[^/]+/cancel$", p) and m == "POST":
+            return UCPEventType.CHECKOUT_SESSION_CANCELED
+
+        # /checkout-sessions/{id}  PUT  → updated (or escalation)
+        if re.search(r"/checkout-sessions/[^/]+$", p) and m == "PUT":
+            if response_body and response_body.get("status") == "requires_escalation":
+                return UCPEventType.CHECKOUT_ESCALATION
+            return UCPEventType.CHECKOUT_SESSION_UPDATED
+
+        # /checkout-sessions/{id}  GET  → get
+        if re.search(r"/checkout-sessions/[^/]+$", p) and m == "GET":
+            return UCPEventType.CHECKOUT_SESSION_GET
+
+        # /carts  POST  → created
+        if re.search(r"/carts/?$", p) and m == "POST":
+            return UCPEventType.CART_CREATED
+
+        # /carts/{id}/cancel  POST  → canceled
+        if re.search(r"/carts/[^/]+/cancel$", p) and m == "POST":
+            return UCPEventType.CART_CANCELED
+
+        # /carts/{id}  PUT  → updated
+        if re.search(r"/carts/[^/]+$", p) and m == "PUT":
+            return UCPEventType.CART_UPDATED
+
+        # /carts/{id}  GET  → get
+        if re.search(r"/carts/[^/]+$", p) and m == "GET":
+            return UCPEventType.CART_GET
+
+        # /orders (strict: /orders or /orders/{id}, not /reorder etc.)
+        if re.search(r"/orders(?:/[^/]+)?$", p):
+            if m == "POST":
+                return UCPEventType.ORDER_CREATED
+            return UCPEventType.ORDER_UPDATED
+
+        # Identity linking (strict: /identity or /oauth paths)
+        if re.search(r"/(?:identity|oauth)(?:/|$)", p):
+            return UCPEventType.IDENTITY_LINK_INITIATED
+
+        # Simulate shipping (samples server testing endpoint)
+        if "/simulate-shipping" in p:
+            return UCPEventType.ORDER_SHIPPED
+
+        # Errors
+        if status_code and status_code >= 400:
+            return UCPEventType.ERROR
+
+        return UCPEventType.REQUEST
+
+    # ------------------------------------------------------------------ #
+    # Extract checkout & commerce fields from a UCP JSON body
+    # ------------------------------------------------------------------ #
+
+    @classmethod
+    def extract(cls, body: Optional[dict]) -> Dict[str, Any]:
+        """Extract analytics fields from a UCP checkout/order JSON body.
+
+        Works with both request bodies (partial) and response bodies (full).
+        Returns a dict of field_name → value; callers merge into UCPEvent.
+        """
+        if not body or not isinstance(body, dict):
+            return {}
+
+        result: Dict[str, Any] = {}
+
+        # --- session / order id ---
+        raw_id = body.get("id", "")
+        id_str = str(raw_id) if raw_id else ""
+        if id_str:
+            # Heuristic: order objects have checkout_id; checkout objects don't
+            if "checkout_id" in body:
+                result["order_id"] = id_str
+                result["checkout_session_id"] = body["checkout_id"]
+            else:
+                result["checkout_session_id"] = id_str
+
+        if "order_id" in body:
+            result["order_id"] = body["order_id"]
+
+        # --- order confirmation in checkout response (spec: checkout.order) ---
+        order_obj = body.get("order")
+        if isinstance(order_obj, dict):
+            order_id = order_obj.get("id")
+            if order_id:
+                result["order_id"] = str(order_id)
+            permalink = order_obj.get("permalink_url")
+            if permalink:
+                result["permalink_url"] = permalink
+
+        # --- permalink_url (direct on order objects) ---
+        if "permalink_url" in body:
+            result["permalink_url"] = body["permalink_url"]
+
+        # --- status ---
+        if "status" in body:
+            result["checkout_status"] = body["status"]
+
+        # --- currency ---
+        if "currency" in body:
+            result["currency"] = body["currency"]
+
+        # --- totals array ---
+        cls._extract_totals(body.get("totals"), result)
+
+        # --- line items ---
+        items = body.get("line_items")
+        if isinstance(items, list) and items:
+            result["line_item_count"] = len(items)
+            result["line_items_json"] = json.dumps(items, default=str)
+
+        # --- ucp metadata envelope (object-keyed by reverse-domain name) ---
+        cls._extract_ucp_metadata(body.get("ucp"), result)
+
+        # --- payment (spec: payment.instruments[], fallback: payment.handlers[]) ---
+        cls._extract_payment(body, result)
+
+        # --- fulfillment extension ---
+        cls._extract_fulfillment(body.get("fulfillment"), result)
+
+        # --- discount extension ---
+        cls._extract_discounts(body.get("discounts"), result)
+
+        # --- checkout metadata ---
+        if "expires_at" in body:
+            result["expires_at"] = body["expires_at"]
+        if "continue_url" in body:
+            result["continue_url"] = body["continue_url"]
+
+        # --- messages (errors / warnings from the server) ---
+        messages = body.get("messages")
+        if isinstance(messages, list) and messages:
+            result["messages_json"] = json.dumps(messages, default=str)
+            for msg in messages:
+                if isinstance(msg, dict) and msg.get("type") == "error":
+                    result["error_code"] = msg.get("code")
+                    result["error_message"] = msg.get("content")
+                    result["error_severity"] = msg.get("severity")
+                    break
+
+        # --- links ---
+        links = body.get("links")
+        if isinstance(links, list):
+            for link in links:
+                if isinstance(link, dict) and link.get("type") == "order":
+                    result["order_id"] = result.get("order_id") or link.get("url")
+
+        # Drop None values
+        return {k: v for k, v in result.items() if v is not None}
+
+    # ------------------------------------------------------------------ #
+    # Helpers
+    # ------------------------------------------------------------------ #
+
+    @classmethod
+    def _extract_totals(cls, totals: Any, result: Dict[str, Any]) -> None:
+        """Parse the UCP totals array into individual amount fields.
+
+        Spec total types: items_discount, subtotal, discount, fulfillment,
+        tax, fee, total.
+        """
+        if not isinstance(totals, list):
+            return
+        for item in totals:
+            if not isinstance(item, dict):
+                continue
+            t_type = item.get("type", "")
+            amount = item.get("amount")
+            if amount is None:
+                continue
+            if t_type == "items_discount":
+                result["items_discount_amount"] = amount
+            elif t_type == "subtotal":
+                result["subtotal_amount"] = amount
+            elif t_type == "discount":
+                result["discount_amount"] = amount
+            elif t_type == "fulfillment":
+                result["fulfillment_amount"] = amount
+            elif t_type == "tax":
+                result["tax_amount"] = amount
+            elif t_type == "fee":
+                result["fee_amount"] = amount
+            elif t_type == "total":
+                result["total_amount"] = amount
+
+    @classmethod
+    def _extract_ucp_metadata(cls, ucp_meta: Any, result: Dict[str, Any]) -> None:
+        """Parse the UCP metadata envelope.
+
+        The spec structures capabilities and payment_handlers as objects
+        keyed by reverse-domain name, e.g.:
+            {"dev.ucp.shopping.checkout": [{"version": "2026-01-11"}]}
+
+        Also handles the legacy flat-array format for backward compatibility.
+        """
+        if not isinstance(ucp_meta, dict):
+            return
+
+        result["ucp_version"] = ucp_meta.get("version")
+
+        caps_raw = ucp_meta.get("capabilities")
+        if caps_raw:
+            # Normalize: object-keyed (spec) or flat array (legacy)
+            caps_list = cls._normalize_registry(caps_raw)
+            if caps_list:
+                result["capabilities_json"] = json.dumps(caps_list, default=str)
+
+        # payment_handlers in the UCP metadata envelope
+        ph_raw = ucp_meta.get("payment_handlers")
+        if ph_raw and isinstance(ph_raw, dict):
+            # Flatten object-keyed payment handlers for analytics
+            ph_list = cls._normalize_registry(ph_raw)
+            if ph_list:
+                # Store first handler id if not already set
+                if "payment_handler_id" not in result and ph_list:
+                    first = ph_list[0]
+                    if isinstance(first, dict):
+                        result["payment_handler_id"] = first.get("id")
+
+    @classmethod
+    def _normalize_registry(cls, raw: Any) -> list:
+        """Convert object-keyed registry to flat list for analytics storage.
+
+        Handles both formats:
+        - Spec format: {"dev.ucp.shopping.checkout": [{"version": "..."}]}
+        - Legacy format: [{"name": "dev.ucp.shopping.checkout", "version": "..."}]
+        """
+        if isinstance(raw, list):
+            return raw
+        if isinstance(raw, dict):
+            flat = []
+            for domain_name, entries in raw.items():
+                if isinstance(entries, list):
+                    for entry in entries:
+                        if isinstance(entry, dict):
+                            # Add the domain name so analytics can reference it
+                            item = {"name": domain_name, **entry}
+                            flat.append(item)
+                elif isinstance(entries, dict):
+                    flat.append({"name": domain_name, **entries})
+            return flat
+        return []
+
+    @classmethod
+    def _extract_payment(cls, body: dict, result: Dict[str, Any]) -> None:
+        """Extract payment fields.
+
+        Spec uses payment.instruments[] (each with handler_id).
+        Falls back to legacy payment.handlers[] for backward compat.
+        """
+        payment = body.get("payment") or {}
+        payment_data = body.get("payment_data") or {}
+
+        # payment_data (from complete request/response)
+        if isinstance(payment_data, dict) and payment_data:
+            result["payment_handler_id"] = payment_data.get(
+                "handler_id"
+            ) or payment_data.get("id")
+            result["payment_instrument_type"] = payment_data.get("type")
+            result["payment_brand"] = payment_data.get("brand")
+            return
+
+        if not isinstance(payment, dict) or not payment:
+            return
+
+        # Spec format: payment.instruments[] (each instrument has handler_id)
+        instruments = payment.get("instruments")
+        if isinstance(instruments, list) and instruments:
+            first = instruments[0]
+            if isinstance(first, dict):
+                result["payment_handler_id"] = first.get("handler_id") or first.get(
+                    "id"
+                )
+                result["payment_instrument_type"] = first.get("type")
+                result["payment_brand"] = first.get("brand")
+            return
+
+        # Legacy/demo format: payment.handlers[]
+        handlers = payment.get("handlers")
+        if isinstance(handlers, list) and handlers:
+            first = handlers[0]
+            if isinstance(first, dict):
+                result["payment_handler_id"] = first.get("id")
+                result["payment_instrument_type"] = first.get("type")
+                result["payment_brand"] = first.get("brand")
+            return
+
+        # Direct fields
+        result["payment_handler_id"] = payment.get("handler_id") or payment.get("id")
+        result["payment_instrument_type"] = payment.get("type")
+        result["payment_brand"] = payment.get("brand")
+
+    @classmethod
+    def _extract_fulfillment(cls, fulfillment: Any, result: Dict[str, Any]) -> None:
+        """Extract fulfillment fields.
+
+        Handles both checkout fulfillment (methods[]) and order fulfillment
+        (expectations[]/events[]).
+        """
+        if not isinstance(fulfillment, dict):
+            return
+
+        # Checkout: fulfillment.methods[]  (legacy demo format also uses this)
+        methods = fulfillment.get("methods")
+        if isinstance(methods, list) and methods:
+            first = methods[0]
+            if isinstance(first, dict):
+                result["fulfillment_type"] = first.get("type")
+                dests = first.get("destinations", [])
+                if isinstance(dests, list) and dests:
+                    result["fulfillment_destination_country"] = dests[0].get(
+                        "address_country"
+                    )
+            return
+
+        # Order: fulfillment.expectations[]
+        expectations = fulfillment.get("expectations")
+        if isinstance(expectations, list) and expectations:
+            first = expectations[0]
+            if isinstance(first, dict):
+                result["fulfillment_type"] = first.get("type")
+
+    @classmethod
+    def _extract_discounts(cls, discounts: Any, result: Dict[str, Any]) -> None:
+        """Extract discount extension fields.
+
+        Spec: discounts.codes (input), discounts.applied (output).
+        """
+        if not isinstance(discounts, dict):
+            return
+
+        codes = discounts.get("codes")
+        if isinstance(codes, list) and codes:
+            result["discount_codes_json"] = json.dumps(codes, default=str)
+
+        applied = discounts.get("applied")
+        if isinstance(applied, list) and applied:
+            result["discount_applied_json"] = json.dumps(applied, default=str)
