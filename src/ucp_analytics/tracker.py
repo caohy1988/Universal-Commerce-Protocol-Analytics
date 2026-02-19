@@ -149,6 +149,54 @@ class UCPAnalyticsTracker:
         await self._writer.enqueue(event.to_bq_row())
         return event
 
+    async def record_jsonrpc(
+        self,
+        *,
+        tool_name: str,
+        transport: str = "mcp",
+        status_code: int = 200,
+        response_body: Optional[dict] = None,
+        latency_ms: Optional[float] = None,
+        merchant_host: str = "",
+    ) -> UCPEvent:
+        """Record a JSON-RPC (MCP or A2A) event.
+
+        Maps tool/action names to UCP event types via classify_jsonrpc(),
+        then extracts fields from the response body.
+        """
+        event_type = UCPResponseParser.classify_jsonrpc(
+            tool_name, status_code, response_body
+        )
+
+        # Look up HTTP equivalent for metadata
+        http_mapping = UCPResponseParser._TOOL_TO_HTTP.get(tool_name, ("", ""))
+        method, path = http_mapping
+
+        event = UCPEvent(
+            event_type=event_type.value,
+            app_name=self.app_name,
+            merchant_host=merchant_host,
+            transport=transport,
+            http_method=method.upper() if method else "",
+            http_path=path,
+            http_status_code=status_code if status_code else None,
+            latency_ms=latency_ms,
+        )
+
+        if response_body and isinstance(response_body, dict):
+            if self.redact_pii:
+                response_body = self._redact(response_body)
+            fields = UCPResponseParser.extract(response_body)
+            for key, val in fields.items():
+                if hasattr(event, key):
+                    setattr(event, key, val)
+
+        if self.custom_metadata:
+            event.custom_metadata_json = json.dumps(self.custom_metadata)
+
+        await self._writer.enqueue(event.to_bq_row())
+        return event
+
     async def record_event(self, event: UCPEvent) -> None:
         """Record a manually constructed event."""
         await self._writer.enqueue(event.to_bq_row())

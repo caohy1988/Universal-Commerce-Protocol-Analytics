@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-ADK + BigQuery Demo — UCPAgentAnalyticsPlugin
-===============================================
+ADK + BigQuery Comprehensive Demo — All 27 Event Types, 3 Transports
+======================================================================
 
-Demonstrates the ADK plugin adapter that wraps UCPAnalyticsTracker.
-Uses a simulated ADK tool flow (no LLM calls needed) to show that
-tool callbacks properly capture UCP events to BigQuery.
+Demonstrates the UCPAgentAnalyticsPlugin with simulated ADK tool flows
+covering every UCPEventType value. Uses plugin-based tool callbacks for
+events the plugin can classify, and a separate UCPAnalyticsTracker for
+events it cannot (identity, payment, capability, error, request).
 
 Requires:
     - gcloud auth application-default login
@@ -19,11 +20,11 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-import time
+import json
 import uuid
-from typing import Any, Dict, Optional
-from unittest.mock import MagicMock
+from typing import Dict
 
+from ucp_analytics import UCPAnalyticsTracker, UCPEvent, UCPEventType
 from ucp_analytics.adk_plugin import UCPAgentAnalyticsPlugin
 
 # ==========================================================================
@@ -35,6 +36,7 @@ DATASET_ID = "ucp_analytics"
 TABLE_ID = "ucp_events"
 APP_NAME = "bq_adk_demo"
 
+ALL_27_EVENT_TYPES = sorted(e.value for e in UCPEventType)
 
 # ==========================================================================
 # Simulated ADK Tool Interface
@@ -53,18 +55,20 @@ class MockToolContext:
 
     def __init__(self, app_name: str = APP_NAME):
         self.app_name = app_name
-        self._id = id(self)  # unique per invocation
+        self._id = id(self)
 
 
 # ==========================================================================
-# Simulated UCP Tool Results (spec-aligned)
+# Pre-built UCP Response Bodies (spec-aligned)
 # ==========================================================================
+
+UCP_VERSION = "2026-01-11"
 
 PAYMENT_HANDLERS = [
     {
         "id": "mock_payment_handler",
         "name": "com.mock.payment",
-        "version": "2026-01-11",
+        "version": UCP_VERSION,
         "spec": "https://ucp.dev/specs/mock",
         "config_schema": "https://ucp.dev/schemas/mock.json",
         "instrument_schemas": [],
@@ -72,12 +76,16 @@ PAYMENT_HANDLERS = [
     },
 ]
 
+SESSION_ID = f"chk_adk_{uuid.uuid4().hex[:8]}"
+ORDER_ID = f"order_adk_{uuid.uuid4().hex[:8]}"
+CART_ID = f"cart_adk_{uuid.uuid4().hex[:8]}"
+
 DISCOVERY_RESULT = {
     "ucp": {
-        "version": "2026-01-11",
+        "version": UCP_VERSION,
         "services": {
             "dev.ucp.shopping": {
-                "version": "2026-01-11",
+                "version": UCP_VERSION,
                 "spec": "https://ucp.dev/specs/shopping",
                 "rest": {
                     "schema": "https://ucp.dev/services/shopping/openapi.json",
@@ -86,27 +94,25 @@ DISCOVERY_RESULT = {
             },
         },
         "capabilities": [
-            {"name": "dev.ucp.shopping.checkout", "version": "2026-01-11"},
+            {"name": "dev.ucp.shopping.checkout", "version": UCP_VERSION},
             {
                 "name": "dev.ucp.shopping.fulfillment",
-                "version": "2026-01-11",
+                "version": UCP_VERSION,
                 "extends": "dev.ucp.shopping.checkout",
             },
         ],
     },
-    "payment": {
-        "handlers": PAYMENT_HANDLERS,
-    },
+    "payment": {"handlers": PAYMENT_HANDLERS},
 }
 
 CHECKOUT_CREATED_RESULT = {
     "ucp": {
-        "version": "2026-01-11",
+        "version": UCP_VERSION,
         "capabilities": [
-            {"name": "dev.ucp.shopping.checkout", "version": "2026-01-11"},
+            {"name": "dev.ucp.shopping.checkout", "version": UCP_VERSION},
         ],
     },
-    "id": f"chk_adk_{uuid.uuid4().hex[:8]}",
+    "id": SESSION_ID,
     "status": "incomplete",
     "currency": "USD",
     "line_items": [
@@ -139,6 +145,7 @@ CHECKOUT_CREATED_RESULT = {
 CHECKOUT_UPDATED_RESULT = {
     **CHECKOUT_CREATED_RESULT,
     "status": "ready_for_complete",
+    "buyer": {"full_name": "Jane Doe", "email": "jane@example.com"},
     "fulfillment": {
         "methods": [
             {
@@ -159,7 +166,23 @@ CHECKOUT_UPDATED_RESULT = {
     ],
 }
 
-ORDER_ID = f"order_adk_{uuid.uuid4().hex[:8]}"
+CHECKOUT_ESCALATION_RESULT = {
+    **CHECKOUT_CREATED_RESULT,
+    "status": "requires_escalation",
+    "continue_url": "https://flower-shop.example.com/checkout/escalate",
+    "messages": [
+        {
+            "type": "error",
+            "code": "age_verification_required",
+            "content": "Age verification required",
+            "severity": "requires_buyer_input",
+        },
+    ],
+}
+
+CHECKOUT_GET_RESULT = {
+    **CHECKOUT_UPDATED_RESULT,
+}
 
 CHECKOUT_COMPLETED_RESULT = {
     **CHECKOUT_UPDATED_RESULT,
@@ -170,11 +193,64 @@ CHECKOUT_COMPLETED_RESULT = {
     },
 }
 
-ORDER_SHIPPED_RESULT = {
+# Second session for cancellation
+SESSION2_ID = f"chk_adk2_{uuid.uuid4().hex[:8]}"
+CHECKOUT_CANCELED_RESULT = {
+    "id": SESSION2_ID,
+    "status": "canceled",
+    "currency": "USD",
+    "totals": [{"type": "total", "amount": 2999}],
+}
+
+# Cart results
+CART_CREATED_RESULT = {
+    "ucp": {"version": UCP_VERSION},
+    "id": CART_ID,
+    "status": "active",
+    "currency": "USD",
+    "line_items": [
+        {
+            "id": "li_c1",
+            "item": {"id": "sunflowers", "title": "Sunflower Bunch", "price": 1999},
+            "quantity": 2,
+        },
+    ],
+    "totals": [
+        {"type": "subtotal", "amount": 3998},
+        {"type": "total", "amount": 3998},
+    ],
+}
+
+CART_UPDATED_RESULT = {
+    **CART_CREATED_RESULT,
+    "line_items": [
+        {
+            "id": "li_c1",
+            "item": {"id": "sunflowers", "title": "Sunflower Bunch", "price": 1999},
+            "quantity": 3,
+        },
+        {
+            "id": "li_c2",
+            "item": {"id": "roses", "title": "Red Roses", "price": 2999},
+            "quantity": 1,
+        },
+    ],
+    "totals": [
+        {"type": "subtotal", "amount": 8996},
+        {"type": "total", "amount": 8996},
+    ],
+}
+
+CART_GET_RESULT = {**CART_UPDATED_RESULT}
+
+CART_CANCELED_RESULT = {**CART_UPDATED_RESULT, "status": "canceled"}
+
+# Order results
+ORDER_CREATED_RESULT = {
     "id": ORDER_ID,
-    "checkout_id": CHECKOUT_CREATED_RESULT["id"],
+    "checkout_id": SESSION_ID,
     "permalink_url": f"https://flower-shop.example.com/orders/{ORDER_ID}",
-    "status": "shipped",
+    "status": "confirmed",
     "line_items": CHECKOUT_CREATED_RESULT["line_items"],
     "totals": CHECKOUT_UPDATED_RESULT["totals"],
     "fulfillment": {
@@ -186,6 +262,16 @@ ORDER_SHIPPED_RESULT = {
                 "line_items": [{"id": "li_1", "quantity": 1}],
             },
         ],
+    },
+}
+
+ORDER_CONFIRMED_RESULT = {**ORDER_CREATED_RESULT, "status": "confirmed"}
+
+ORDER_SHIPPED_RESULT = {
+    **ORDER_CREATED_RESULT,
+    "status": "shipped",
+    "fulfillment": {
+        **ORDER_CREATED_RESULT["fulfillment"],
         "events": [
             {
                 "id": "evt_1",
@@ -199,9 +285,13 @@ ORDER_SHIPPED_RESULT = {
     },
 }
 
+ORDER_DELIVERED_RESULT = {**ORDER_CREATED_RESULT, "status": "delivered"}
+ORDER_RETURNED_RESULT = {**ORDER_CREATED_RESULT, "status": "returned"}
+ORDER_CANCELED_RESULT = {**ORDER_CREATED_RESULT, "status": "canceled"}
+
 
 # ==========================================================================
-# Run simulated ADK tool flow
+# Simulate ADK tool call
 # ==========================================================================
 
 
@@ -212,7 +302,7 @@ async def simulate_tool_call(
     result: dict,
     delay_ms: float = 50,
 ):
-    """Simulate before_tool → delay → after_tool ADK callback flow."""
+    """Simulate before_tool -> delay -> after_tool ADK callback flow."""
     tool = MockTool(tool_name)
     ctx = MockToolContext()
 
@@ -222,7 +312,6 @@ async def simulate_tool_call(
         tool_context=ctx,
     )
 
-    # Simulate tool execution time
     await asyncio.sleep(delay_ms / 1000)
 
     await plugin.after_tool_callback(
@@ -235,71 +324,308 @@ async def simulate_tool_call(
     return result
 
 
-async def run_adk_demo():
+# ==========================================================================
+# Phase 1: Plugin-based tool calls (17 event types via _TOOL_TO_HTTP)
+# ==========================================================================
+
+
+async def run_plugin_phase(plugin: UCPAgentAnalyticsPlugin):
+    """Run all plugin-classifiable tool calls."""
     print("\n" + "=" * 70)
-    print("  UCP ANALYTICS — ADK Plugin BigQuery Demo")
+    print("  PHASE 1: ADK Plugin Tool Calls (17 event types)")
     print("=" * 70)
 
-    # Create ADK plugin (writes to BigQuery)
-    plugin = UCPAgentAnalyticsPlugin(
-        project_id=PROJECT_ID,
-        dataset_id=DATASET_ID,
-        table_id=TABLE_ID,
-        app_name=APP_NAME,
-        batch_size=1,  # Flush every event
-        track_all_tools=False,
-    )
+    steps = [
+        # (tool_name, args, result, label)
+        (
+            "discover_merchant", {},
+            DISCOVERY_RESULT, "profile_discovered",
+        ),
+        (
+            "create_checkout",
+            {"line_items": [{"item_id": "roses", "quantity": 1}]},
+            CHECKOUT_CREATED_RESULT,
+            "checkout_session_created",
+        ),
+        (
+            "update_checkout",
+            {"session_id": SESSION_ID, "buyer": {"email": "j@e.com"}},
+            CHECKOUT_UPDATED_RESULT,
+            "checkout_session_updated",
+        ),
+        (
+            "update_checkout", {"session_id": SESSION_ID},
+            CHECKOUT_ESCALATION_RESULT, "checkout_escalation",
+        ),
+        (
+            "get_checkout", {"session_id": SESSION_ID},
+            CHECKOUT_GET_RESULT, "checkout_session_get",
+        ),
+        (
+            "complete_checkout",
+            {"session_id": SESSION_ID, "payment_instrument": "instr_1"},
+            CHECKOUT_COMPLETED_RESULT,
+            "checkout_session_completed",
+        ),
+        (
+            "cancel_checkout", {"session_id": SESSION2_ID},
+            CHECKOUT_CANCELED_RESULT, "checkout_session_canceled",
+        ),
+        (
+            "create_cart",
+            {"line_items": [{"item_id": "sunflowers", "quantity": 2}]},
+            CART_CREATED_RESULT, "cart_created",
+        ),
+        (
+            "update_cart",
+            {"cart_id": CART_ID, "line_items": [
+                {"item_id": "sunflowers", "quantity": 3},
+            ]},
+            CART_UPDATED_RESULT, "cart_updated",
+        ),
+        (
+            "get_cart", {"cart_id": CART_ID},
+            CART_GET_RESULT, "cart_get",
+        ),
+        (
+            "cancel_cart", {"cart_id": CART_ID},
+            CART_CANCELED_RESULT, "cart_canceled",
+        ),
+        (
+            "create_order", {"checkout_id": SESSION_ID},
+            ORDER_CREATED_RESULT, "order_created",
+        ),
+        (
+            "get_order", {"order_id": ORDER_ID},
+            ORDER_CONFIRMED_RESULT, "order_updated",
+        ),
+        (
+            "simulate_shipping", {"order_id": ORDER_ID},
+            ORDER_SHIPPED_RESULT, "order_shipped",
+        ),
+        (
+            "get_order", {"order_id": ORDER_ID},
+            ORDER_DELIVERED_RESULT, "order_delivered",
+        ),
+        (
+            "get_order", {"order_id": ORDER_ID},
+            ORDER_RETURNED_RESULT, "order_returned",
+        ),
+        (
+            "get_order", {"order_id": ORDER_ID},
+            ORDER_CANCELED_RESULT, "order_canceled",
+        ),
+    ]
 
-    session_id = CHECKOUT_CREATED_RESULT["id"]
+    for i, (tool_name, args, result, expected_type) in enumerate(steps, 1):
+        await simulate_tool_call(plugin, tool_name, args, result, delay_ms=30 + i * 5)
+        print(f"   {i:>2}. {tool_name:<25} -> {expected_type}")
 
-    # Step 1: Discovery
-    print("\n-- Step 1: discover_merchant --")
-    await simulate_tool_call(
-        plugin,
-        "discover_merchant",
-        {},
-        DISCOVERY_RESULT,
-        delay_ms=30,
-    )
-    print("   Captured discovery event")
 
-    # Step 2: Create checkout
-    print("\n-- Step 2: create_checkout --")
-    await simulate_tool_call(
-        plugin,
-        "create_checkout",
-        {"line_items": [{"item_id": "roses", "quantity": 1}]},
-        CHECKOUT_CREATED_RESULT,
-        delay_ms=80,
-    )
-    print(f"   Session: {session_id}")
-    print(f"   Status: {CHECKOUT_CREATED_RESULT['status']}")
+# ==========================================================================
+# Phase 2: Direct tracker events (10 event types not in plugin)
+# ==========================================================================
 
-    # Step 3: Update checkout
-    print("\n-- Step 3: update_checkout --")
-    await simulate_tool_call(
-        plugin,
-        "update_checkout",
-        {"session_id": session_id, "buyer": {"email": "jane@example.com"}},
-        CHECKOUT_UPDATED_RESULT,
-        delay_ms=60,
-    )
-    print(f"   Status: {CHECKOUT_UPDATED_RESULT['status']}")
 
-    # Step 4: Complete checkout
-    print("\n-- Step 4: complete_checkout --")
-    await simulate_tool_call(
-        plugin,
-        "complete_checkout",
-        {"session_id": session_id, "payment_instrument": "instr_1"},
-        CHECKOUT_COMPLETED_RESULT,
-        delay_ms=120,
-    )
-    print(f"   Status: {CHECKOUT_COMPLETED_RESULT['status']}")
-    print(f"   Order: {ORDER_ID}")
+async def run_direct_events(tracker: UCPAnalyticsTracker):
+    """Record events the plugin cannot classify."""
+    print("\n" + "=" * 70)
+    print("  PHASE 2: Direct Tracker Events (10 event types)")
+    print("=" * 70)
 
-    # Step 5: Non-UCP tool (should be skipped)
-    print("\n-- Step 5: get_weather (non-UCP, should be skipped) --")
+    direct_events = [
+        # Identity events
+        UCPEvent(
+            event_type="identity_link_initiated",
+            app_name=APP_NAME,
+            identity_provider="google",
+            identity_scope="profile email",
+            latency_ms=20.0,
+        ),
+        UCPEvent(
+            event_type="identity_link_completed",
+            app_name=APP_NAME,
+            identity_provider="google",
+            identity_scope="profile email",
+            latency_ms=15.0,
+        ),
+        UCPEvent(
+            event_type="identity_link_revoked",
+            app_name=APP_NAME,
+            identity_provider="google",
+            latency_ms=10.0,
+        ),
+        # Payment events
+        UCPEvent(
+            event_type="payment_handler_negotiated",
+            app_name=APP_NAME,
+            checkout_session_id=SESSION_ID,
+            payment_handler_id="com.mock.payment",
+            currency="USD",
+            total_amount=3860,
+            latency_ms=12.0,
+        ),
+        UCPEvent(
+            event_type="payment_instrument_selected",
+            app_name=APP_NAME,
+            checkout_session_id=SESSION_ID,
+            payment_handler_id="com.mock.payment",
+            payment_instrument_type="card",
+            payment_brand="Visa",
+            currency="USD",
+            total_amount=3860,
+            latency_ms=8.0,
+        ),
+        UCPEvent(
+            event_type="payment_completed",
+            app_name=APP_NAME,
+            checkout_session_id=SESSION_ID,
+            payment_handler_id="com.mock.payment",
+            payment_instrument_type="card",
+            payment_brand="Visa",
+            currency="USD",
+            total_amount=3860,
+            latency_ms=45.0,
+        ),
+        UCPEvent(
+            event_type="payment_failed",
+            app_name=APP_NAME,
+            checkout_session_id=SESSION_ID,
+            payment_handler_id="com.mock.payment",
+            payment_instrument_type="card",
+            error_code="card_declined",
+            error_message="Insufficient funds",
+            currency="USD",
+            total_amount=3860,
+            latency_ms=30.0,
+        ),
+        # Capability negotiation
+        UCPEvent(
+            event_type="capability_negotiated",
+            app_name=APP_NAME,
+            ucp_version=UCP_VERSION,
+            capabilities_json=json.dumps([
+                {"name": "dev.ucp.shopping.checkout", "version": UCP_VERSION},
+                {"name": "dev.ucp.shopping.fulfillment", "version": UCP_VERSION},
+            ]),
+            latency_ms=10.0,
+        ),
+        # Error event
+        UCPEvent(
+            event_type="error",
+            app_name=APP_NAME,
+            http_status_code=404,
+            error_code="not_found",
+            error_message="Checkout session not found",
+            latency_ms=5.0,
+        ),
+        # Fallback request event
+        UCPEvent(
+            event_type="request",
+            app_name=APP_NAME,
+            http_method="POST",
+            http_path="/some-unknown-endpoint",
+            http_status_code=200,
+            latency_ms=3.0,
+        ),
+    ]
+
+    for event in direct_events:
+        await tracker.record_event(event)
+        print(f"   Recorded: {event.event_type}")
+
+
+# ==========================================================================
+# Phase 3: MCP transport replay
+# ==========================================================================
+
+
+async def run_mcp_transport(tracker: UCPAnalyticsTracker):
+    """Replay key operations via MCP transport."""
+    print("\n" + "=" * 70)
+    print("  PHASE 3: MCP Transport — JSON-RPC Replay")
+    print("=" * 70)
+
+    mcp_calls = [
+        ("discover_merchant", DISCOVERY_RESULT),
+        ("create_checkout", CHECKOUT_CREATED_RESULT),
+        ("update_checkout", CHECKOUT_UPDATED_RESULT),
+        ("complete_checkout", CHECKOUT_COMPLETED_RESULT),
+        ("create_cart", CART_CREATED_RESULT),
+        ("get_order", ORDER_CONFIRMED_RESULT),
+        ("link_identity", {
+            "provider": "google", "scope": "profile email",
+            "status": "pending",
+        }),
+        ("revoke_identity", {"status": "revoked"}),
+        ("negotiate_capability", {
+            "ucp": {"version": UCP_VERSION},
+        }),
+    ]
+
+    for tool_name, body in mcp_calls:
+        event = await tracker.record_jsonrpc(
+            tool_name=tool_name,
+            transport="mcp",
+            status_code=200,
+            response_body=body,
+            latency_ms=25.0,
+            merchant_host="flower-shop.example.com",
+        )
+        print(f"   MCP: {tool_name:<30} -> {event.event_type}")
+
+
+# ==========================================================================
+# Phase 4: A2A transport replay
+# ==========================================================================
+
+
+async def run_a2a_transport(tracker: UCPAnalyticsTracker):
+    """Replay key operations via A2A transport."""
+    print("\n" + "=" * 70)
+    print("  PHASE 4: A2A Transport — JSON-RPC Replay")
+    print("=" * 70)
+
+    a2a_calls = [
+        ("a2a.ucp.discover", DISCOVERY_RESULT),
+        ("a2a.ucp.checkout.create", CHECKOUT_CREATED_RESULT),
+        ("a2a.ucp.checkout.update", CHECKOUT_UPDATED_RESULT),
+        ("a2a.ucp.checkout.complete", CHECKOUT_COMPLETED_RESULT),
+        ("a2a.ucp.cart.create", CART_CREATED_RESULT),
+        ("a2a.ucp.order.get", ORDER_CONFIRMED_RESULT),
+        ("a2a.ucp.identity.link", {
+            "provider": "google", "scope": "profile email",
+            "status": "pending",
+        }),
+        ("a2a.ucp.identity.revoke", {"status": "revoked"}),
+        ("a2a.ucp.capability.negotiate", {
+            "ucp": {"version": UCP_VERSION},
+        }),
+    ]
+
+    for tool_name, body in a2a_calls:
+        event = await tracker.record_jsonrpc(
+            tool_name=tool_name,
+            transport="a2a",
+            status_code=200,
+            response_body=body,
+            latency_ms=30.0,
+            merchant_host="flower-shop.example.com",
+        )
+        print(f"   A2A: {tool_name:<35} -> {event.event_type}")
+
+
+# ==========================================================================
+# Phase 5: Non-UCP tool (should be skipped by plugin)
+# ==========================================================================
+
+
+async def run_non_ucp_tool(plugin: UCPAgentAnalyticsPlugin):
+    """Verify non-UCP tools are skipped."""
+    print("\n" + "=" * 70)
+    print("  PHASE 5: Non-UCP Tool (should be skipped)")
+    print("=" * 70)
+
     await simulate_tool_call(
         plugin,
         "get_weather",
@@ -307,20 +633,19 @@ async def run_adk_demo():
         {"temperature": 68, "condition": "sunny"},
         delay_ms=20,
     )
-    print("   Skipped (not a UCP tool)")
-
-    # Flush and close
-    print("\n   Flushing events to BigQuery...")
-    await plugin.close()
-
-    return session_id
+    print("   get_weather -> skipped (not a UCP tool)")
 
 
-async def verify_adk_bigquery(session_id: str):
+# ==========================================================================
+# BigQuery Verification
+# ==========================================================================
+
+
+async def verify_bigquery():
     from google.cloud import bigquery
 
     print("\n" + "=" * 70)
-    print("  ADK BIGQUERY VERIFICATION")
+    print("  BIGQUERY VERIFICATION — All 27 Event Types")
     print("=" * 70)
 
     client = bigquery.Client(project=PROJECT_ID)
@@ -330,85 +655,151 @@ async def verify_adk_bigquery(session_id: str):
     await asyncio.sleep(10)
 
     query = f"""
-    SELECT event_type, checkout_status, total_amount, fulfillment_amount,
-           payment_handler_id, ucp_version, latency_ms, app_name,
-           checkout_session_id
+    SELECT event_type, transport, COUNT(*) as cnt
     FROM `{table_ref}`
     WHERE app_name = '{APP_NAME}'
-    ORDER BY timestamp DESC
-    LIMIT 10
+    GROUP BY event_type, transport
+    ORDER BY event_type, transport
     """
-    print(f"\n   Querying BigQuery for ADK events...")
+    print("   Querying BigQuery...\n")
 
     rows = list(client.query(query).result())
 
     if not rows:
-        print("\n   WARNING: No rows found yet. Streaming buffer delay (~90s).")
+        print("   WARNING: No rows found in BigQuery yet.")
+        print("   Streaming inserts may take up to 90 seconds to be queryable.")
         print(
-            f"   Run manually: SELECT * FROM `{table_ref}` WHERE app_name = '{APP_NAME}'"
+            f"   Run manually: SELECT * FROM `{table_ref}`"
+            f" WHERE app_name = '{APP_NAME}'"
         )
         client.close()
         return
 
-    print(f"\n   Found {len(rows)} ADK events in BigQuery:")
-    print(f"   {'#':<3} {'Event Type':<30} {'Status':<22} {'Total':>9} {'Latency':>8}")
-    print("   " + "-" * 75)
+    # Build event type -> transport counts
+    event_map: Dict[str, Dict[str, int]] = {}
+    for row in rows:
+        et = row.event_type
+        tp = row.transport or "rest"
+        if et not in event_map:
+            event_map[et] = {}
+        event_map[et][tp] = row.cnt
 
-    for i, row in enumerate(rows, 1):
-        total_str = f"${row.total_amount / 100:.2f}" if row.total_amount else ""
-        status_str = row.checkout_status or ""
-        latency_str = f"{row.latency_ms:.0f}ms" if row.latency_ms else ""
-        print(
-            f"   {i:<3} {row.event_type:<30} {status_str:<22} {total_str:>9} {latency_str:>8}"
-        )
+    # Print summary table
+    print(f"   {'Event Type':<35} {'REST':>5} {'MCP':>5} {'A2A':>5} {'Total':>6}")
+    print("   " + "-" * 60)
 
-    event_types = {row.event_type for row in rows}
-    print(f"\n   Event types: {sorted(event_types)}")
+    total_events = 0
+    for et in sorted(event_map.keys()):
+        rest_cnt = event_map[et].get("rest", 0)
+        mcp_cnt = event_map[et].get("mcp", 0)
+        a2a_cnt = event_map[et].get("a2a", 0)
+        row_total = rest_cnt + mcp_cnt + a2a_cnt
+        total_events += row_total
+        print(f"   {et:<35} {rest_cnt:>5} {mcp_cnt:>5} {a2a_cnt:>5} {row_total:>6}")
 
-    # Verify only UCP events (not get_weather)
+    print("   " + "-" * 60)
+    print(f"   {'TOTAL':<35} {'':>5} {'':>5} {'':>5} {total_events:>6}")
+
+    # Verification checks
+    found_types = set(event_map.keys())
+    expected_types = set(ALL_27_EVENT_TYPES)
+    missing = expected_types - found_types
+    extra = found_types - expected_types
+
+    print(f"\n   Event types found: {len(found_types)}/27")
+
     print("\n   Verification:")
-    checks = [
-        (
-            "request" in event_types or "profile_discovered" in event_types,
-            "Discovery event captured",
-        ),
-        ("checkout_session_created" in event_types, "Checkout created captured"),
-        (
-            "checkout_session_updated" in event_types
-            or "checkout_session_completed" in event_types,
-            "Checkout lifecycle captured",
-        ),
-        (
-            not any("weather" in (row.event_type or "") for row in rows),
-            "Non-UCP tool correctly skipped",
-        ),
-    ]
+    print(f"     [{'PASS' if not missing else 'FAIL'}] All 27 event types present")
+    if missing:
+        print(f"       Missing: {sorted(missing)}")
+    if extra:
+        print(f"       Extra: {sorted(extra)}")
 
-    all_ok = True
-    for ok, label in checks:
-        status = "PASS" if ok else "FAIL"
-        if not ok:
-            all_ok = False
-        print(f"     [{status}] {label}")
+    # Check transports
+    has_rest = any("rest" in v for v in event_map.values())
+    has_mcp = any("mcp" in v for v in event_map.values())
+    has_a2a = any("a2a" in v for v in event_map.values())
+    print(f"     [{'PASS' if has_rest else 'FAIL'}] REST transport events present")
+    print(f"     [{'PASS' if has_mcp else 'FAIL'}] MCP transport events present")
+    print(f"     [{'PASS' if has_a2a else 'FAIL'}] A2A transport events present")
 
-    has_latency = any(row.latency_ms and row.latency_ms > 0 for row in rows)
-    print(
-        f"     [{'PASS' if has_latency else 'FAIL'}] Latency captured from tool timing"
-    )
-    if not has_latency:
-        all_ok = False
+    # Check non-UCP tool was skipped
+    has_weather = any("weather" in et for et in found_types)
+    skip_ok = "PASS" if not has_weather else "FAIL"
+    print(f"     [{skip_ok}] Non-UCP tool correctly skipped")
 
+    # Check latency
+    latency_query = f"""
+    SELECT COUNT(*) as cnt
+    FROM `{table_ref}`
+    WHERE app_name = '{APP_NAME}' AND latency_ms > 0
+    """
+    latency_rows = list(client.query(latency_query).result())
+    has_latency = latency_rows[0].cnt > 0 if latency_rows else False
+    lat_ok = "PASS" if has_latency else "FAIL"
+    print(f"     [{lat_ok}] Latency captured from tool timing")
+
+    all_ok = not missing and has_rest and has_mcp and has_a2a and not has_weather
     if all_ok:
         print("\n   All ADK BigQuery verifications passed!")
     else:
-        print("\n   Some verifications failed.")
+        print("\n   Some verifications failed — check streaming buffer delay.")
 
     client.close()
 
 
+# ==========================================================================
+# Main
+# ==========================================================================
+
+
 async def main():
-    session_id = await run_adk_demo()
-    await verify_adk_bigquery(session_id)
+    print("\n" + "=" * 70)
+    print("  UCP ANALYTICS — ADK Plugin Comprehensive BigQuery Demo")
+    print("=" * 70)
+
+    # Create ADK plugin (writes to BigQuery)
+    plugin = UCPAgentAnalyticsPlugin(
+        project_id=PROJECT_ID,
+        dataset_id=DATASET_ID,
+        table_id=TABLE_ID,
+        app_name=APP_NAME,
+        batch_size=1,
+        track_all_tools=False,
+    )
+
+    # Separate tracker for events the plugin can't handle
+    tracker = UCPAnalyticsTracker(
+        project_id=PROJECT_ID,
+        dataset_id=DATASET_ID,
+        table_id=TABLE_ID,
+        app_name=APP_NAME,
+        batch_size=1,
+        auto_create_table=True,
+    )
+
+    # Phase 1: Plugin-based tool calls (17 event types)
+    await run_plugin_phase(plugin)
+
+    # Phase 2: Direct tracker events (10 event types)
+    await run_direct_events(tracker)
+
+    # Phase 3: MCP transport replay
+    await run_mcp_transport(tracker)
+
+    # Phase 4: A2A transport replay
+    await run_a2a_transport(tracker)
+
+    # Phase 5: Non-UCP tool (should be skipped)
+    await run_non_ucp_tool(plugin)
+
+    # Flush and close
+    print("\n   Flushing events to BigQuery...")
+    await plugin.close()
+    await tracker.close()
+
+    # BigQuery verification
+    await verify_bigquery()
     print("\n   Done!")
 
 

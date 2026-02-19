@@ -112,6 +112,92 @@ class TestClassify:
             == UCPEventType.ORDER_SHIPPED
         )
 
+    # --- Order lifecycle (status-based) ---
+
+    def test_order_delivered(self):
+        assert (
+            UCPResponseParser.classify(
+                "GET", "/orders/order_123", 200, {"status": "delivered"}
+            )
+            == UCPEventType.ORDER_DELIVERED
+        )
+
+    def test_order_returned(self):
+        assert (
+            UCPResponseParser.classify(
+                "GET", "/orders/order_123", 200, {"status": "returned"}
+            )
+            == UCPEventType.ORDER_RETURNED
+        )
+
+    def test_order_canceled(self):
+        assert (
+            UCPResponseParser.classify(
+                "GET", "/orders/order_123", 200, {"status": "canceled"}
+            )
+            == UCPEventType.ORDER_CANCELED
+        )
+
+    def test_order_canceled_british_spelling(self):
+        assert (
+            UCPResponseParser.classify(
+                "GET", "/orders/order_123", 200, {"status": "cancelled"}
+            )
+            == UCPEventType.ORDER_CANCELED
+        )
+
+    # --- Webhook paths ---
+
+    def test_webhook_order_delivered(self):
+        assert (
+            UCPResponseParser.classify("POST", "/webhooks/order-delivered", 200, {})
+            == UCPEventType.ORDER_DELIVERED
+        )
+
+    def test_webhook_order_returned(self):
+        assert (
+            UCPResponseParser.classify("POST", "/webhook/order-returned", 200, {})
+            == UCPEventType.ORDER_RETURNED
+        )
+
+    def test_webhook_order_canceled(self):
+        assert (
+            UCPResponseParser.classify("POST", "/webhooks/order_canceled", 200, {})
+            == UCPEventType.ORDER_CANCELED
+        )
+
+    # --- Identity sub-paths ---
+
+    def test_identity_initiated(self):
+        assert (
+            UCPResponseParser.classify("POST", "/identity", 200, {})
+            == UCPEventType.IDENTITY_LINK_INITIATED
+        )
+
+    def test_identity_callback(self):
+        assert (
+            UCPResponseParser.classify("GET", "/identity/callback", 200, {})
+            == UCPEventType.IDENTITY_LINK_COMPLETED
+        )
+
+    def test_oauth_callback(self):
+        assert (
+            UCPResponseParser.classify("GET", "/oauth/callback", 200, {})
+            == UCPEventType.IDENTITY_LINK_COMPLETED
+        )
+
+    def test_identity_revoke(self):
+        assert (
+            UCPResponseParser.classify("POST", "/identity/revoke", 200, {})
+            == UCPEventType.IDENTITY_LINK_REVOKED
+        )
+
+    def test_identity_delete(self):
+        assert (
+            UCPResponseParser.classify("DELETE", "/identity/link_123", 200, {})
+            == UCPEventType.IDENTITY_LINK_REVOKED
+        )
+
 
 class TestExtract:
     # Sample checkout response using SDK/samples-aligned format
@@ -410,6 +496,107 @@ class TestExtract:
         fields = UCPResponseParser.extract(body)
         assert fields["continue_url"] == ("https://shop.example.com/checkout/escalate")
 
+    def test_extract_identity_fields(self):
+        """Identity provider and scope from response body."""
+        body = {"provider": "google", "scope": "openid email"}
+        fields = UCPResponseParser.extract(body)
+        assert fields["identity_provider"] == "google"
+        assert fields["identity_scope"] == "openid email"
+
+    def test_extract_identity_nested(self):
+        """Identity fields from nested identity object."""
+        body = {"identity": {"provider": "github", "scope": "read:user"}}
+        fields = UCPResponseParser.extract(body)
+        assert fields["identity_provider"] == "github"
+        assert fields["identity_scope"] == "read:user"
+
     def test_extract_empty(self):
         assert UCPResponseParser.extract(None) == {}
         assert UCPResponseParser.extract({}) == {}
+
+
+class TestClassifyJsonRPC:
+    """Tests for classify_jsonrpc() — MCP and A2A tool name mapping."""
+
+    def test_mcp_create_checkout(self):
+        assert (
+            UCPResponseParser.classify_jsonrpc("create_checkout")
+            == UCPEventType.CHECKOUT_SESSION_CREATED
+        )
+
+    def test_mcp_complete_checkout(self):
+        assert (
+            UCPResponseParser.classify_jsonrpc("complete_checkout")
+            == UCPEventType.CHECKOUT_SESSION_COMPLETED
+        )
+
+    def test_mcp_cancel_checkout(self):
+        assert (
+            UCPResponseParser.classify_jsonrpc("cancel_checkout")
+            == UCPEventType.CHECKOUT_SESSION_CANCELED
+        )
+
+    def test_mcp_discover(self):
+        assert (
+            UCPResponseParser.classify_jsonrpc("discover_merchant")
+            == UCPEventType.PROFILE_DISCOVERED
+        )
+
+    def test_mcp_create_cart(self):
+        assert (
+            UCPResponseParser.classify_jsonrpc("create_cart")
+            == UCPEventType.CART_CREATED
+        )
+
+    def test_mcp_create_order(self):
+        assert (
+            UCPResponseParser.classify_jsonrpc("create_order")
+            == UCPEventType.ORDER_CREATED
+        )
+
+    def test_mcp_get_order_delivered(self):
+        assert (
+            UCPResponseParser.classify_jsonrpc(
+                "get_order", 200, {"status": "delivered"}
+            )
+            == UCPEventType.ORDER_DELIVERED
+        )
+
+    def test_a2a_checkout_create(self):
+        assert (
+            UCPResponseParser.classify_jsonrpc("a2a.ucp.checkout.create")
+            == UCPEventType.CHECKOUT_SESSION_CREATED
+        )
+
+    def test_a2a_checkout_complete(self):
+        assert (
+            UCPResponseParser.classify_jsonrpc("a2a.ucp.checkout.complete")
+            == UCPEventType.CHECKOUT_SESSION_COMPLETED
+        )
+
+    def test_a2a_identity_link(self):
+        assert (
+            UCPResponseParser.classify_jsonrpc("a2a.ucp.identity.link")
+            == UCPEventType.IDENTITY_LINK_INITIATED
+        )
+
+    def test_a2a_identity_revoke(self):
+        assert (
+            UCPResponseParser.classify_jsonrpc("a2a.ucp.identity.revoke")
+            == UCPEventType.IDENTITY_LINK_REVOKED
+        )
+
+    def test_negotiate_capability(self):
+        assert (
+            UCPResponseParser.classify_jsonrpc("negotiate_capability")
+            == UCPEventType.CAPABILITY_NEGOTIATED
+        )
+
+    def test_a2a_capability_negotiate(self):
+        assert (
+            UCPResponseParser.classify_jsonrpc("a2a.ucp.capability.negotiate")
+            == UCPEventType.CAPABILITY_NEGOTIATED
+        )
+
+    def test_unknown_tool(self):
+        assert UCPResponseParser.classify_jsonrpc("get_weather") == UCPEventType.REQUEST

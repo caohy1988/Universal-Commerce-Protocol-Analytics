@@ -1,44 +1,43 @@
 # UCP Analytics — Examples
 
-This directory contains four runnable examples that demonstrate UCP Analytics
-from local-only quick starts to full BigQuery integration with and without
-the Google ADK plugin.
+This directory contains runnable examples that demonstrate UCP Analytics
+covering all 27 UCP event types across checkout, cart, order, identity,
+payment, and transport scenarios.
 
-| Example | BigQuery? | ADK? | Purpose |
+## Overview
+
+| Example | BigQuery? | Transport | Event Types Covered |
 |---|---|---|---|
-| [`e2e_demo.py`](#e2e-demo-local-sqlite) | No (SQLite) | No | Quick local demo, no GCP needed |
-| [`flower_shop_analytics.py`](#flower-shop-integration) | Yes | No | Add analytics to the official UCP samples server |
-| [`bq_demo.py`](#bigquery-demo) | Yes | No | Full BigQuery E2E with verification |
-| [`bq_adk_demo.py`](#adk-bigquery-demo) | Yes | Yes | ADK plugin E2E with verification |
+| [`e2e_demo.py`](#e2e-demo-local-sqlite) | No (SQLite) | REST | Checkout happy path (5 types) |
+| [`scenarios_demo.py`](#scenarios-demo) | Yes (BigQuery) | REST | Errors, cancellation, escalation (7 types) |
+| [`cart_demo.py`](#cart-demo) | Yes (BigQuery) | REST | Cart CRUD + checkout conversion (6 types) |
+| [`order_lifecycle_demo.py`](#order-lifecycle-demo) | Yes (BigQuery) | REST | Order delivered/returned/canceled (8 types) |
+| [`transport_demo.py`](#transport-demo) | Yes (BigQuery) | REST/MCP/A2A | All 3 transports compared (5 types) |
+| [`identity_payment_demo.py`](#identity--payment-demo) | Yes (BigQuery) | REST | Identity linking + payment flows (10 types) |
+| [`bq_demo.py`](#bigquery-demo) | Yes | REST/MCP/A2A | Comprehensive demo — all 27 event types, 3 transports, SDK models, BQ verification |
+| [`bq_adk_demo.py`](#adk-bigquery-demo) | Yes | ADK/MCP/A2A | Comprehensive ADK demo — all 27 event types, 3 transports, SDK models, BQ verification |
 
----
+### Quick Start (No GCP)
 
-## BigQuery Demo
-
-**`bq_demo.py`** — Full end-to-end demo that writes real UCP analytics events
-to BigQuery using `UCPAnalyticsTracker`, the FastAPI middleware, and the HTTPX
-client hook, then queries BigQuery to verify the data landed correctly.
-
-### What It Does
-
-The demo spins up a mini UCP merchant server and a shopping agent client in a
-single process. Both sides are instrumented with analytics:
-
-- **Server side:** `UCPAnalyticsMiddleware` captures every inbound UCP request
-- **Client side:** `UCPClientEventHook` captures every outbound UCP call
-
-The agent walks through a full checkout lifecycle:
-
-```
-Discovery  -->  Create Checkout  -->  Update (buyer + fulfillment)
-     -->  Apply Discount  -->  Complete Checkout  -->  Simulate Shipping
+```bash
+pip install fastapi uvicorn httpx
+python examples/e2e_demo.py
 ```
 
-Each step generates spec-aligned analytics events that stream into BigQuery.
-After the flow completes, the demo queries BigQuery and prints a verification
-report.
+### Quick Start (BigQuery)
 
-### Prerequisites
+```bash
+gcloud auth application-default login
+uv sync --all-extras
+# Edit PROJECT_ID in examples/_demo_utils.py
+uv run python examples/scenarios_demo.py    # errors + edge cases
+uv run python examples/cart_demo.py          # cart lifecycle
+uv run python examples/order_lifecycle_demo.py  # order lifecycle
+uv run python examples/transport_demo.py     # REST vs MCP vs A2A
+uv run python examples/identity_payment_demo.py  # identity + payment
+```
+
+### Prerequisites (BigQuery demos)
 
 1. **Google Cloud project** with BigQuery API enabled:
 
@@ -55,280 +54,202 @@ report.
 3. **Python dependencies:**
 
    ```bash
-   # From the repo root
-   uv sync                       # core deps
-   # or with FastAPI middleware support
-   uv sync --extra fastapi
+   uv sync --all-extras
    ```
 
-### Configuration
+4. **Configuration:**
 
-Open `bq_demo.py` and update the project ID at the top:
+   Open `examples/_demo_utils.py` and update the project ID:
 
-```python
-PROJECT_ID = "your-gcp-project-id"    # <-- change this
-DATASET_ID = "ucp_analytics"          # dataset (auto-created)
-TABLE_ID   = "ucp_events"             # table   (auto-created)
-```
+   ```python
+   PROJECT_ID = "your-gcp-project-id"    # <-- change this
+   ```
 
-The tracker will create the dataset and table automatically on first write.
+---
+
+## BigQuery Demo
+
+**`bq_demo.py`** — Comprehensive demo covering all 27 UCP event types across
+3 transports (REST, MCP, A2A) with UCP SDK models and BigQuery verification.
+
+### What It Does
+
+Spins up a mini UCP merchant server with all endpoints (checkout, cart, order,
+identity, payment, capabilities) and a shopping agent client. Both sides are
+instrumented with analytics. The demo runs in three phases:
+
+1. **REST transport** — exercises all 27 event types via HTTP (discovery, checkout
+   lifecycle, cart lifecycle, order lifecycle, identity linking, payment events,
+   capability negotiation, error/fallback)
+2. **MCP transport** — replays key operations via `record_jsonrpc(transport="mcp")`
+3. **A2A transport** — replays key operations via `record_jsonrpc(transport="a2a")`
+
+After all phases, BigQuery is queried to verify all 27 event types are present
+across all 3 transports.
 
 ### Run
 
 ```bash
+# Edit PROJECT_ID in examples/bq_demo.py
 uv run python examples/bq_demo.py
 ```
 
-### Expected Output
-
-```
-======================================================================
-  UCP ANALYTICS -- BigQuery E2E Demo
-======================================================================
-
--- Step 1: Discover Merchant --
-   UCP version: 2026-01-11
-   Capabilities: ['dev.ucp.shopping.checkout', ...]
-
--- Step 2: Create Checkout --
-   Session: chk_dc597aa65654
-   Status: incomplete
-   Total: $86.97
-
--- Step 3: Update (buyer + fulfillment) --
-   Status: ready_for_complete
-   Total (with fulfillment): $92.96
-
--- Step 4: Apply Discount --
-   Discount applied, new total: $87.96
-
--- Step 5: Complete Checkout --
-   Status: completed
-   Order: order_9781e7c356
-   Permalink: https://shop.example.com/orders/order_9781e7c356
-
--- Step 6: Simulate Shipping --
-   Order status: shipped
-
-   Flushing events to BigQuery...
-
-======================================================================
-  BIGQUERY VERIFICATION
-======================================================================
-
-   Waiting 10s for BigQuery streaming buffer...
-   Querying BigQuery for session chk_dc597aa65654...
-
-   Found 10 events in BigQuery:
-   #   Event Type                     Status                 Total   Latency
-   -------------------------------------------------------------------------
-   1   checkout_session_created       incomplete            $86.97       1ms
-   2   checkout_session_created       incomplete            $86.97       3ms
-   ...
-
-   Verification:
-     [PASS] checkout_session_created
-     [PASS] checkout_session_updated
-     [PASS] checkout_session_completed
-     [PASS] fulfillment_amount extracted
-     [PASS] payment_handler_id extracted
-     [PASS] ucp_version extracted
-
-   All BigQuery verifications passed!
-```
-
-Each operation appears twice (once from the server middleware, once from the
-client hook) — this is expected when both integration points are active.
-
-### What Gets Written to BigQuery
-
-Every event row includes:
-
-| Field | Example Value | Source |
-|---|---|---|
-| `event_type` | `checkout_session_completed` | Auto-classified from HTTP method + path |
-| `checkout_session_id` | `chk_dc597aa65654` | Extracted from response body `id` |
-| `checkout_status` | `completed` | Extracted from response body `status` |
-| `currency` | `USD` | Extracted from response body |
-| `subtotal_amount` | `7997` | From `totals[]` where `type=subtotal` |
-| `fulfillment_amount` | `599` | From `totals[]` where `type=fulfillment` |
-| `discount_amount` | `500` | From `totals[]` where `type=discount` |
-| `total_amount` | `8796` | From `totals[]` where `type=total` |
-| `payment_handler_id` | `com.mock.payment` | From `payment.instruments[0].handler_id` |
-| `payment_instrument_type` | `card` | From `payment.instruments[0].type` |
-| `ucp_version` | `2026-01-11` | From `ucp.version` |
-| `capabilities_json` | `[{"name":"dev.ucp.shopping.checkout",...}]` | From `ucp.capabilities` array (per SDK: array of `{name, version}` objects) |
-| `discount_codes_json` | `["FLOWERS10"]` | From `discounts.codes` |
-| `discount_applied_json` | `[{"code":"FLOWERS10","amount":500,...}]` | From `discounts.applied` |
-| `permalink_url` | `https://shop.example.com/orders/...` | From `order.permalink_url` |
-| `order_id` | `order_9781e7c356` | From `order.id` (nested in checkout) |
-| `fulfillment_type` | `shipping` | From `fulfillment.methods[0].type` |
-| `fulfillment_destination_country` | `US` | From `fulfillment.methods[0].destinations[0]` |
-| `latency_ms` | `3.14` | Measured end-to-end per request |
-| `idempotency_key` | `46994281-a318-...` | From request `Idempotency-Key` header |
-| `request_id` | `670cf848-070c-...` | From request `Request-Id` header |
-
 ### Verify Manually
 
-After the demo completes you can query BigQuery directly:
-
 ```sql
-SELECT event_type, checkout_status, total_amount, fulfillment_amount,
-       payment_handler_id, discount_codes_json, permalink_url, latency_ms
+SELECT event_type, transport, COUNT(*) as cnt
 FROM `YOUR_PROJECT.ucp_analytics.ucp_events`
 WHERE app_name = 'bq_demo'
-ORDER BY timestamp;
+GROUP BY event_type, transport
+ORDER BY event_type, transport;
 ```
 
 ---
 
 ## ADK BigQuery Demo
 
-**`bq_adk_demo.py`** — Demonstrates the `UCPAgentAnalyticsPlugin` adapter that
-integrates UCP analytics into a Google ADK agent via tool callbacks. No LLM
-calls are needed — the demo simulates the ADK tool lifecycle directly.
+**`bq_adk_demo.py`** — Comprehensive ADK demo covering all 27 UCP event types
+across 3 transports (REST/ADK, MCP, A2A) with UCP SDK models and BigQuery
+verification.
 
 ### What It Does
 
-Instead of HTTP requests, this demo exercises the ADK plugin's
-`before_tool_callback` / `after_tool_callback` flow. It simulates an ADK agent
-calling UCP tools in sequence:
+Uses `UCPAgentAnalyticsPlugin` for tool-based events and a separate
+`UCPAnalyticsTracker` for events the plugin can't classify. Runs in five phases:
 
-```
-discover_merchant  -->  create_checkout  -->  update_checkout
-     -->  complete_checkout  -->  get_weather (non-UCP, should be skipped)
-```
+1. **Plugin tool calls** — 17 event types via `simulate_tool_call()` (discovery,
+   checkout lifecycle including escalation, cart lifecycle, order lifecycle
+   through all terminal states)
+2. **Direct tracker events** — 10 event types the plugin can't handle (identity
+   linking, payment flows, capability negotiation, error, request)
+3. **MCP transport** — replays key operations via `record_jsonrpc(transport="mcp")`
+4. **A2A transport** — replays key operations via `record_jsonrpc(transport="a2a")`
+5. **Non-UCP tool** — verifies `get_weather` is correctly skipped
 
-The plugin:
-
-1. Records a start timestamp in `before_tool_callback`
-2. Classifies the tool name into a UCP event type via a tool-name-to-HTTP
-   mapping (e.g. `create_checkout` maps to `POST /checkout-sessions`)
-3. Extracts spec-aligned fields from the tool result
-4. Computes latency from the before/after timing gap
-5. Writes the event to BigQuery
-6. Skips non-UCP tools (like `get_weather`) unless `track_all_tools=True`
-
-### Prerequisites
-
-Same as the BigQuery demo above, plus the ADK extra:
-
-```bash
-# Install with ADK support
-uv sync --all-extras
-# or just the ADK extra
-uv sync --extra adk
-```
-
-Verify the ADK plugin is importable:
-
-```bash
-uv run python -c "from ucp_analytics.adk_plugin import UCPAgentAnalyticsPlugin; print('OK')"
-```
-
-### Configuration
-
-Open `bq_adk_demo.py` and update the project ID:
-
-```python
-PROJECT_ID = "your-gcp-project-id"    # <-- change this
-DATASET_ID = "ucp_analytics"          # dataset (auto-created)
-TABLE_ID   = "ucp_events"             # table   (auto-created)
-```
+After all phases, BigQuery is queried to verify all 27 event types are present.
 
 ### Run
 
 ```bash
+# Edit PROJECT_ID in examples/bq_adk_demo.py
 uv run python examples/bq_adk_demo.py
 ```
-
-### Expected Output
-
-```
-======================================================================
-  UCP ANALYTICS -- ADK Plugin BigQuery Demo
-======================================================================
-
--- Step 1: discover_merchant --
-   Captured discovery event
-
--- Step 2: create_checkout --
-   Session: chk_adk_dbd9d0bf
-   Status: incomplete
-
--- Step 3: update_checkout --
-   Status: ready_for_complete
-
--- Step 4: complete_checkout --
-   Status: completed
-   Order: order_adk_fc9baece
-
--- Step 5: get_weather (non-UCP, should be skipped) --
-   Skipped (not a UCP tool)
-
-   Flushing events to BigQuery...
-
-======================================================================
-  ADK BIGQUERY VERIFICATION
-======================================================================
-
-   Waiting 10s for BigQuery streaming buffer...
-   Querying BigQuery for ADK events...
-
-   Found 4 ADK events in BigQuery:
-   #   Event Type                     Status                 Total   Latency
-   -------------------------------------------------------------------------
-   1   profile_discovered                                               31ms
-   2   checkout_session_created       incomplete            $32.61      81ms
-   3   checkout_session_updated       ready_for_complete    $38.60      61ms
-   4   checkout_session_completed     completed             $38.60     121ms
-
-   Event types: ['checkout_session_completed', 'checkout_session_created',
-                 'checkout_session_updated', 'profile_discovered']
-
-   Verification:
-     [PASS] Discovery event captured
-     [PASS] Checkout created captured
-     [PASS] Checkout lifecycle captured
-     [PASS] Non-UCP tool correctly skipped
-     [PASS] Latency captured from tool timing
-
-   All ADK BigQuery verifications passed!
-```
-
-Note that unlike the non-ADK demo, each operation produces exactly one event
-(not two) because there is only a single integration point (the plugin).
-
-### How the ADK Plugin Classifies Tools
-
-The plugin maps ADK tool names to equivalent UCP HTTP operations so the
-existing classifier can determine the correct event type:
-
-| Tool Name | HTTP Equivalent | Event Type |
-|---|---|---|
-| `discover_merchant` | `GET /.well-known/ucp` | `profile_discovered` |
-| `create_checkout` | `POST /checkout-sessions` | `checkout_session_created` |
-| `update_checkout` | `PUT /checkout-sessions/{id}` | `checkout_session_updated` |
-| `complete_checkout` | `POST /checkout-sessions/{id}/complete` | `checkout_session_completed` |
-| `cancel_checkout` | `POST /checkout-sessions/{id}/cancel` | `checkout_session_canceled` |
-| `create_cart` | `POST /carts` | `cart_created` |
-| `update_cart` | `PUT /carts/{id}` | `cart_updated` |
-| `cancel_cart` | `POST /carts/{id}/cancel` | `cart_canceled` |
-| `create_order` | `POST /orders` | `order_created` |
-| `get_weather` | *(skipped)* | *(not recorded)* |
-
-Tools whose names don't match any UCP pattern are silently skipped (or recorded
-as generic `request` events if `track_all_tools=True`).
 
 ### Verify Manually
 
 ```sql
-SELECT event_type, checkout_status, total_amount, fulfillment_amount,
-       payment_handler_id, permalink_url, latency_ms
+SELECT event_type, transport, COUNT(*) as cnt
 FROM `YOUR_PROJECT.ucp_analytics.ucp_events`
 WHERE app_name = 'bq_adk_demo'
-ORDER BY timestamp;
+GROUP BY event_type, transport
+ORDER BY event_type, transport;
 ```
+
+---
+
+## Scenarios Demo
+
+**`scenarios_demo.py`** — Exercises error paths and edge cases in UCP checkout.
+Uses UCP SDK Pydantic models and writes to BigQuery.
+
+```bash
+uv run python examples/scenarios_demo.py
+```
+
+**Scenarios covered:**
+
+1. **Payment failure + retry** — complete with `fail_token` (402), then `success_token`
+2. **Fraud block** — complete with `fraud_token` (403)
+3. **Out of stock** — create checkout with unavailable item (400)
+4. **Checkout cancellation** — `POST /checkout-sessions/{id}/cancel`
+5. **Escalation + recovery** — trigger `requires_escalation`, poll with GET, then complete
+6. **404 Not Found** — GET nonexistent session
+7. **Idempotency conflict** — duplicate POST with same key (409)
+
+**Event types:** `checkout_session_created`, `checkout_session_updated`,
+`checkout_session_completed`, `checkout_session_canceled`, `checkout_escalation`,
+`checkout_session_get`, `error`
+
+---
+
+## Cart Demo
+
+**`cart_demo.py`** — Full cart lifecycle including cart-to-checkout conversion.
+Uses UCP SDK Pydantic models and writes to BigQuery.
+
+```bash
+uv run python examples/cart_demo.py
+```
+
+**Flows:**
+
+1. **Cart CRUD** — create, get, update (add/remove items), get
+2. **Cart cancellation** — cancel an active cart
+3. **Cart-to-checkout conversion** — create cart, convert to checkout, complete
+
+**Event types:** `cart_created`, `cart_get`, `cart_updated`, `cart_canceled`,
+`checkout_session_created`, `checkout_session_completed`
+
+---
+
+## Order Lifecycle Demo
+
+**`order_lifecycle_demo.py`** — Full order lifecycle through all terminal states.
+Writes to BigQuery.
+
+```bash
+uv run python examples/order_lifecycle_demo.py
+```
+
+**Flows:**
+
+1. **Happy path** — order created -> shipped -> delivered
+2. **Cancellation** — order created -> canceled
+3. **Return** — shipped -> delivered -> returned
+4. **Fulfillment variants** — shipping, pickup, digital
+
+**Event types:** `order_created`, `order_updated`, `order_shipped`,
+`order_delivered`, `order_returned`, `order_canceled`
+
+---
+
+## Transport Demo
+
+**`transport_demo.py`** — Compares the same checkout flow across REST, MCP, and A2A transports.
+Uses UCP SDK Pydantic models and writes to BigQuery.
+
+```bash
+uv run python examples/transport_demo.py
+```
+
+Uses `classify_jsonrpc()` for MCP/A2A tool name mapping. Produces identical
+event types with different `transport` values (`rest`, `mcp`, `a2a`).
+
+**Event types:** `profile_discovered`, `checkout_session_created`,
+`checkout_session_updated`, `checkout_session_completed`, `capability_negotiated`
+
+---
+
+## Identity & Payment Demo
+
+**`identity_payment_demo.py`** — Identity linking and payment negotiation flows.
+Uses UCP SDK Pydantic models and writes to BigQuery.
+
+```bash
+uv run python examples/identity_payment_demo.py
+```
+
+**Flows:**
+
+1. **OAuth identity linking** — initiate -> callback -> linked
+2. **Identity revocation** — revoke an existing link
+3. **Payment handler negotiation** — compute intersection of platform + merchant handlers
+4. **Payment instrument selection** — buyer picks from available instruments
+5. **Payment failure + success** — `fail_token` -> payment_failed, `success_token` -> payment_completed
+
+**Event types:** `identity_link_initiated`, `identity_link_completed`,
+`identity_link_revoked`, `payment_handler_negotiated`,
+`payment_instrument_selected`, `payment_completed`, `payment_failed`
 
 ---
 
@@ -349,15 +270,6 @@ capabilities, and latency stats.
 
 ---
 
-## Flower Shop Integration
-
-**`flower_shop_analytics.py`** — Shows how to add UCP analytics to the
-[official UCP samples server](https://github.com/Universal-Commerce-Protocol/samples)
-with just two lines of code. Not a standalone demo — requires the samples
-server to be running.
-
----
-
 ## Cleanup
 
 To delete the demo data from BigQuery after testing:
@@ -365,7 +277,9 @@ To delete the demo data from BigQuery after testing:
 ```sql
 -- Delete only demo rows (preserves production data)
 DELETE FROM `YOUR_PROJECT.ucp_analytics.ucp_events`
-WHERE app_name IN ('bq_demo', 'bq_adk_demo');
+WHERE app_name IN ('bq_demo', 'bq_adk_demo', 'scenarios_demo',
+                   'cart_demo', 'order_lifecycle_demo',
+                   'transport_demo', 'identity_payment_demo');
 ```
 
 Or drop the entire table:
