@@ -82,10 +82,33 @@ class UCPResponseParser:
         if re.search(r"/orders(?:/[^/]+)?$", p):
             if m == "POST":
                 return UCPEventType.ORDER_CREATED
+            # Check response body status for order lifecycle events
+            if response_body and isinstance(response_body, dict):
+                order_status = response_body.get("status", "")
+                if order_status == "delivered":
+                    return UCPEventType.ORDER_DELIVERED
+                if order_status == "returned":
+                    return UCPEventType.ORDER_RETURNED
+                if order_status in ("canceled", "cancelled"):
+                    return UCPEventType.ORDER_CANCELED
             return UCPEventType.ORDER_UPDATED
+
+        # Webhook paths for order lifecycle
+        if re.search(r"/webhooks?/order[_-]delivered", p):
+            return UCPEventType.ORDER_DELIVERED
+        if re.search(r"/webhooks?/order[_-]returned", p):
+            return UCPEventType.ORDER_RETURNED
+        if re.search(r"/webhooks?/order[_-]canceled", p):
+            return UCPEventType.ORDER_CANCELED
 
         # Identity linking (strict: /identity or /oauth paths)
         if re.search(r"/(?:identity|oauth)(?:/|$)", p):
+            # /identity/revoke or DELETE → revoked
+            if "/revoke" in p or m == "DELETE":
+                return UCPEventType.IDENTITY_LINK_REVOKED
+            # /identity/callback or /oauth/callback → completed
+            if "/callback" in p:
+                return UCPEventType.IDENTITY_LINK_COMPLETED
             return UCPEventType.IDENTITY_LINK_INITIATED
 
         # Simulate shipping (samples server testing endpoint)
@@ -95,6 +118,81 @@ class UCPResponseParser:
         # Errors
         if status_code and status_code >= 400:
             return UCPEventType.ERROR
+
+        return UCPEventType.REQUEST
+
+    # ------------------------------------------------------------------ #
+    # JSON-RPC classification (MCP / A2A transports)
+    # ------------------------------------------------------------------ #
+
+    # Map tool/action names to equivalent HTTP method + path
+    _TOOL_TO_HTTP: Dict[str, tuple] = {
+        # MCP tool names
+        "create_checkout": ("POST", "/checkout-sessions"),
+        "update_checkout": ("PUT", "/checkout-sessions/{id}"),
+        "complete_checkout": ("POST", "/checkout-sessions/{id}/complete"),
+        "cancel_checkout": ("POST", "/checkout-sessions/{id}/cancel"),
+        "get_checkout": ("GET", "/checkout-sessions/{id}"),
+        "create_cart": ("POST", "/carts"),
+        "update_cart": ("PUT", "/carts/{id}"),
+        "cancel_cart": ("POST", "/carts/{id}/cancel"),
+        "get_cart": ("GET", "/carts/{id}"),
+        "create_order": ("POST", "/orders"),
+        "get_order": ("GET", "/orders/{id}"),
+        "discover": ("GET", "/.well-known/ucp"),
+        "discover_merchant": ("GET", "/.well-known/ucp"),
+        "simulate_shipping": ("POST", "/testing/simulate-shipping/{id}"),
+        "link_identity": ("POST", "/identity"),
+        "revoke_identity": ("DELETE", "/identity/revoke"),
+        "negotiate_capability": ("POST", "/capabilities/negotiate"),
+        # A2A action prefixes (a2a.ucp.*)
+        "a2a.ucp.checkout.create": ("POST", "/checkout-sessions"),
+        "a2a.ucp.checkout.update": ("PUT", "/checkout-sessions/{id}"),
+        "a2a.ucp.checkout.complete": ("POST", "/checkout-sessions/{id}/complete"),
+        "a2a.ucp.checkout.cancel": ("POST", "/checkout-sessions/{id}/cancel"),
+        "a2a.ucp.checkout.get": ("GET", "/checkout-sessions/{id}"),
+        "a2a.ucp.cart.create": ("POST", "/carts"),
+        "a2a.ucp.cart.update": ("PUT", "/carts/{id}"),
+        "a2a.ucp.cart.cancel": ("POST", "/carts/{id}/cancel"),
+        "a2a.ucp.cart.get": ("GET", "/carts/{id}"),
+        "a2a.ucp.order.create": ("POST", "/orders"),
+        "a2a.ucp.order.get": ("GET", "/orders/{id}"),
+        "a2a.ucp.discover": ("GET", "/.well-known/ucp"),
+        "a2a.ucp.identity.link": ("POST", "/identity"),
+        "a2a.ucp.identity.revoke": ("DELETE", "/identity/revoke"),
+        "a2a.ucp.capability.negotiate": ("POST", "/capabilities/negotiate"),
+    }
+
+    @classmethod
+    def classify_jsonrpc(
+        cls,
+        tool_name: str,
+        status_code: int = 200,
+        response_body: Optional[dict] = None,
+    ) -> UCPEventType:
+        """Classify a JSON-RPC tool/action name into a UCP event type.
+
+        Used for MCP (tools/call) and A2A (tasks/send) transports.
+        Maps tool names to HTTP equivalents, then delegates to classify().
+        """
+        # Capability negotiation keywords (check before _TOOL_TO_HTTP
+        # since /capabilities/negotiate doesn't match classify() patterns)
+        if "negotiate" in tool_name or "capability" in tool_name:
+            return UCPEventType.CAPABILITY_NEGOTIATED
+
+        mapping = cls._TOOL_TO_HTTP.get(tool_name)
+        if mapping:
+            method, path = mapping
+            return cls.classify(method, path, status_code, response_body)
+
+        # Handle A2A DataPart keys like "add_to_checkout" → update
+        if "add_to" in tool_name or "update" in tool_name:
+            if "checkout" in tool_name:
+                return cls.classify(
+                    "PUT", "/checkout-sessions/{id}", status_code, response_body
+                )
+            if "cart" in tool_name:
+                return cls.classify("PUT", "/carts/{id}", status_code, response_body)
 
         return UCPEventType.REQUEST
 
@@ -179,6 +277,19 @@ class UCPResponseParser:
             result["expires_at"] = body["expires_at"]
         if "continue_url" in body:
             result["continue_url"] = body["continue_url"]
+
+        # --- identity linking ---
+        if "provider" in body:
+            result["identity_provider"] = body["provider"]
+        if "scope" in body:
+            result["identity_scope"] = body["scope"]
+        # Nested identity object
+        identity = body.get("identity")
+        if isinstance(identity, dict):
+            if "provider" in identity:
+                result["identity_provider"] = identity["provider"]
+            if "scope" in identity:
+                result["identity_scope"] = identity["scope"]
 
         # --- messages (errors / warnings from the server) ---
         messages = body.get("messages")

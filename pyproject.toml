@@ -26,9 +26,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+sdk = ["ucp-sdk"]
 fastapi = ["fastapi>=0.110.0", "starlette>=0.36.0"]
 adk = ["google-adk>=1.0.0"]
-all = ["ucp-analytics[fastapi,adk]"]
+all = ["ucp-analytics[sdk,fastapi,adk]"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
@@ -58,3 +59,6 @@ select = ["E", "F", "I", "W"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[tool.uv.sources]
+ucp-sdk = { git = "https://github.com/Universal-Commerce-Protocol/python-sdk.git" }

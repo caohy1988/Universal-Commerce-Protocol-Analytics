@@ -507,29 +507,33 @@ classifier handles all UCP resource types:
 | Event Type | Trigger | Description |
 |---|---|---|
 | `order_created` | `POST /orders` | Order created |
-| `order_updated` | `GET /orders/{id}` | Order status polled |
+| `order_updated` | `GET /orders/{id}` | Order status polled (generic) |
 | `order_shipped` | Shipping simulation | Order shipped (fulfillment event) |
+| `order_delivered` | `GET /orders/{id}` (status=`delivered`) or webhook | Order delivered to buyer |
+| `order_returned` | `GET /orders/{id}` (status=`returned`) or webhook | Order returned by buyer |
+| `order_canceled` | `GET /orders/{id}` (status=`canceled`) or webhook | Order canceled |
 
 ### Discovery & Capability Events
 
 | Event Type | Trigger | Description |
 |---|---|---|
 | `profile_discovered` | `GET /.well-known/ucp` | Merchant UCP profile fetched |
-| `capability_negotiated` | Capability exchange | Capabilities agreed upon |
+| `capability_negotiated` | Capability exchange / A2A negotiation | Capabilities agreed upon |
 
 ### Identity Events
 
 | Event Type | Trigger | Description |
 |---|---|---|
 | `identity_link_initiated` | `POST /identity` or `/oauth` | Identity linking started |
-| `identity_link_completed` | OAuth callback | Identity linked |
-| `identity_link_revoked` | Revocation endpoint | Identity link removed |
+| `identity_link_completed` | `GET /identity/callback` or `/oauth/callback` | Identity linked via OAuth callback |
+| `identity_link_revoked` | `POST /identity/revoke` or `DELETE /identity/*` | Identity link removed |
 
 ### Payment Events
 
 | Event Type | Trigger | Description |
 |---|---|---|
 | `payment_handler_negotiated` | Handler selection | Payment handler agreed upon |
+| `payment_instrument_selected` | Instrument selection | Buyer selects payment instrument |
 | `payment_completed` | Successful payment | Payment processed |
 | `payment_failed` | Failed payment | Payment declined or errored |
 
@@ -827,20 +831,38 @@ rate, and session timeline debugging.
 
 ## Examples
 
-Four runnable examples are included in the [`examples/`](../examples/) directory:
+Eight runnable examples are included in the [`examples/`](../examples/) directory,
+covering all 27 UCP event types:
 
-| Example | BigQuery? | ADK? | Purpose |
+| Example | BigQuery? | Transport | Purpose |
 |---|---|---|---|
-| `e2e_demo.py` | No (SQLite) | No | Quick local demo, no GCP needed |
-| `flower_shop_analytics.py` | Yes | No | Add analytics to the UCP samples server |
-| `bq_demo.py` | Yes | No | Full BigQuery E2E with verification |
-| `bq_adk_demo.py` | Yes | Yes | ADK plugin E2E with verification |
+| `e2e_demo.py` | No (SQLite) | REST | Checkout happy path (no GCP needed) |
+| `scenarios_demo.py` | Yes (BigQuery) | REST | Errors, cancellation, escalation |
+| `cart_demo.py` | Yes (BigQuery) | REST | Cart lifecycle + checkout conversion |
+| `order_lifecycle_demo.py` | Yes (BigQuery) | REST | Order delivered/returned/canceled |
+| `transport_demo.py` | Yes (BigQuery) | REST/MCP/A2A | All 3 transport comparisons |
+| `identity_payment_demo.py` | Yes (BigQuery) | REST | Identity linking + payment flows |
+| `bq_demo.py` | Yes | REST/MCP/A2A | Comprehensive — all 27 event types, 3 transports, SDK models, BQ verification |
+| `bq_adk_demo.py` | Yes | ADK/MCP/A2A | Comprehensive ADK — all 27 event types, 3 transports, SDK models, BQ verification |
 
 ### Quick Start (No GCP)
 
 ```bash
 pip install fastapi uvicorn httpx
 python examples/e2e_demo.py
+```
+
+### Quick Start (BigQuery)
+
+```bash
+gcloud auth application-default login
+uv sync --all-extras
+# Edit PROJECT_ID in examples/_demo_utils.py
+uv run python examples/scenarios_demo.py         # errors + edge cases
+uv run python examples/cart_demo.py              # cart lifecycle
+uv run python examples/order_lifecycle_demo.py   # order lifecycle
+uv run python examples/transport_demo.py         # REST vs MCP vs A2A
+uv run python examples/identity_payment_demo.py  # identity + payment
 ```
 
 ### BigQuery E2E Demo
