@@ -29,7 +29,11 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from ucp_analytics import UCPAnalyticsMiddleware, UCPAnalyticsTracker, UCPClientEventHook
+from ucp_analytics import (
+    UCPAnalyticsMiddleware,
+    UCPAnalyticsTracker,
+    UCPClientEventHook,
+)
 
 # ==========================================================================
 # Config
@@ -67,25 +71,50 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="UCP Flower Shop (BQ Demo)", lifespan=lifespan)
 
 
+PAYMENT_HANDLERS = [
+    {
+        "id": "mock_payment_handler",
+        "name": "com.mock.payment",
+        "version": UCP_VERSION,
+        "spec": "https://ucp.dev/specs/mock",
+        "config_schema": "https://ucp.dev/schemas/mock.json",
+        "instrument_schemas": [],
+        "config": {},
+    },
+]
+
+
 @app.get("/.well-known/ucp")
 async def discovery():
     return {
         "ucp": {
             "version": UCP_VERSION,
             "services": {
-                "dev.ucp.shopping": [
-                    {"version": UCP_VERSION, "transport": "rest",
-                     "endpoint": "http://localhost:8199/"},
-                ],
+                "dev.ucp.shopping": {
+                    "version": UCP_VERSION,
+                    "spec": "https://ucp.dev/specs/shopping",
+                    "rest": {
+                        "schema": "https://ucp.dev/services/shopping/openapi.json",
+                        "endpoint": "http://localhost:8199",
+                    },
+                },
             },
-            "capabilities": {
-                "dev.ucp.shopping.checkout": [{"version": UCP_VERSION}],
-                "dev.ucp.shopping.fulfillment": [{"version": UCP_VERSION}],
-                "dev.ucp.shopping.discount": [{"version": UCP_VERSION}],
-            },
-            "payment_handlers": {
-                "com.mock.payment": [{"version": UCP_VERSION}],
-            },
+            "capabilities": [
+                {"name": "dev.ucp.shopping.checkout", "version": UCP_VERSION},
+                {
+                    "name": "dev.ucp.shopping.fulfillment",
+                    "version": UCP_VERSION,
+                    "extends": "dev.ucp.shopping.checkout",
+                },
+                {
+                    "name": "dev.ucp.shopping.discount",
+                    "version": UCP_VERSION,
+                    "extends": "dev.ucp.shopping.checkout",
+                },
+            ],
+        },
+        "payment": {
+            "handlers": PAYMENT_HANDLERS,
         },
     }
 
@@ -103,7 +132,11 @@ async def create_checkout(request: Request):
         qty = item.get("quantity", 1)
         li = {
             "id": f"li_{uuid.uuid4().hex[:8]}",
-            "item": {"id": product_id, "title": product["title"], "price": product["price"]},
+            "item": {
+                "id": product_id,
+                "title": product["title"],
+                "price": product["price"],
+            },
             "quantity": qty,
         }
         line_items.append(li)
@@ -115,13 +148,10 @@ async def create_checkout(request: Request):
     session = {
         "ucp": {
             "version": UCP_VERSION,
-            "capabilities": {
-                "dev.ucp.shopping.checkout": [{"version": UCP_VERSION}],
-                "dev.ucp.shopping.fulfillment": [{"version": UCP_VERSION}],
-            },
-            "payment_handlers": {
-                "com.mock.payment": [{"version": UCP_VERSION}],
-            },
+            "capabilities": [
+                {"name": "dev.ucp.shopping.checkout", "version": UCP_VERSION},
+                {"name": "dev.ucp.shopping.fulfillment", "version": UCP_VERSION},
+            ],
         },
         "id": session_id,
         "status": "incomplete",
@@ -134,9 +164,14 @@ async def create_checkout(request: Request):
         ],
         "buyer": body.get("buyer", {}),
         "payment": {
+            "handlers": PAYMENT_HANDLERS,
             "instruments": [
-                {"id": "instr_card", "handler_id": "com.mock.payment",
-                 "type": "card", "brand": "Visa"},
+                {
+                    "id": "instr_card",
+                    "handler_id": "mock_payment_handler",
+                    "type": "card",
+                    "brand": "Visa",
+                },
             ],
         },
         "messages": [],
@@ -161,7 +196,9 @@ async def update_checkout(session_id: str, request: Request):
         session["fulfillment"] = body["fulfillment"]
         shipping = 599
         session["totals"].append({"type": "fulfillment", "amount": shipping})
-        subtotal = next(t["amount"] for t in session["totals"] if t["type"] == "subtotal")
+        subtotal = next(
+            t["amount"] for t in session["totals"] if t["type"] == "subtotal"
+        )
         tax = next(t["amount"] for t in session["totals"] if t["type"] == "tax")
         session["totals"] = [t for t in session["totals"] if t["type"] != "total"]
         session["totals"].append({"type": "total", "amount": subtotal + tax + shipping})
@@ -173,12 +210,20 @@ async def update_checkout(session_id: str, request: Request):
         total_entry["amount"] -= discount_amount
         session["discounts"] = {
             "codes": body["discounts"].get("codes", []),
-            "applied": [{"code": "FLOWERS10", "title": "Flower discount", "amount": discount_amount}],
+            "applied": [
+                {
+                    "code": "FLOWERS10",
+                    "title": "Flower discount",
+                    "amount": discount_amount,
+                }
+            ],
         }
 
     has_buyer = bool(session.get("buyer", {}).get("email"))
     has_fulfillment = "fulfillment" in session
-    session["status"] = "ready_for_complete" if (has_buyer and has_fulfillment) else "incomplete"
+    session["status"] = (
+        "ready_for_complete" if (has_buyer and has_fulfillment) else "incomplete"
+    )
 
     SESSIONS[session_id] = session
     return JSONResponse(session)
@@ -197,9 +242,12 @@ async def complete_checkout(session_id: str, request: Request):
         session["status"] = "requires_escalation"
         session["continue_url"] = "https://shop.example.com/checkout/escalate"
         session["messages"] = [
-            {"type": "error", "code": "missing_payment",
-             "content": "Payment instrument required",
-             "severity": "requires_buyer_input"},
+            {
+                "type": "error",
+                "code": "missing_payment",
+                "content": "Payment instrument required",
+                "severity": "requires_buyer_input",
+            },
         ]
         SESSIONS[session_id] = session
         return JSONResponse(session, status_code=400)
@@ -220,8 +268,16 @@ async def complete_checkout(session_id: str, request: Request):
         "totals": session["totals"],
         "fulfillment": {
             "expectations": [
-                {"type": "delivery", "status": "pending",
-                 "estimated_delivery": "2026-02-25"},
+                {
+                    "id": "exp_1",
+                    "method_type": "shipping",
+                    "destination": {"address_country": "US", "postal_code": "94043"},
+                    "line_items": [
+                        {"id": li["id"], "quantity": li["quantity"]}
+                        for li in session["line_items"]
+                    ],
+                    "description": "Standard Shipping",
+                },
             ],
         },
     }
@@ -236,8 +292,11 @@ async def simulate_shipping(order_id: str):
         return JSONResponse({"error": "not_found"}, status_code=404)
     ORDERS[order_id]["status"] = "shipped"
     ORDERS[order_id]["fulfillment"]["events"] = [
-        {"type": "shipped", "tracking_number": "9400111899223456789012",
-         "carrier": "USPS"},
+        {
+            "type": "shipped",
+            "tracking_number": "9400111899223456789012",
+            "carrier": "USPS",
+        },
     ]
     return JSONResponse(ORDERS[order_id])
 
@@ -245,6 +304,7 @@ async def simulate_shipping(order_id: str):
 # ==========================================================================
 # Shopping Agent (HTTPX + UCPClientEventHook → BigQuery)
 # ==========================================================================
+
 
 async def run_shopping_agent(client_tracker: UCPAnalyticsTracker):
     print("\n" + "=" * 70)
@@ -261,13 +321,12 @@ async def run_shopping_agent(client_tracker: UCPAnalyticsTracker):
             "Content-Type": "application/json",
         },
     ) as client:
-
         # Step 1: Discovery
         print("\n-- Step 1: Discover Merchant --")
         resp = await client.get("/.well-known/ucp")
         profile = resp.json()
         print(f"   UCP version: {profile['ucp']['version']}")
-        caps = list(profile["ucp"]["capabilities"].keys())
+        caps = [c["name"] for c in profile["ucp"]["capabilities"]]
         print(f"   Capabilities: {caps}")
 
         # Step 2: Create Checkout
@@ -306,9 +365,17 @@ async def run_shopping_agent(client_tracker: UCPAnalyticsTracker):
                 "fulfillment": {
                     "methods": [
                         {
+                            "id": "method_1",
                             "type": "shipping",
+                            "line_item_ids": [],
                             "destinations": [
-                                {"address_country": "US", "postal_code": "94043"},
+                                {
+                                    "id": "dest_1",
+                                    "address_country": "US",
+                                    "postal_code": "94043",
+                                    "address_locality": "Mountain View",
+                                    "address_region": "CA",
+                                },
                             ],
                         }
                     ]
@@ -372,6 +439,7 @@ async def run_shopping_agent(client_tracker: UCPAnalyticsTracker):
 # Verify in BigQuery
 # ==========================================================================
 
+
 async def verify_bigquery(session_id: str):
     from google.cloud import bigquery
 
@@ -416,7 +484,9 @@ async def verify_bigquery(session_id: str):
         print("\n   WARNING: No rows found in BigQuery yet.")
         print("   Streaming inserts may take up to 90 seconds to be queryable.")
         print(f"   Run this query manually later:")
-        print(f"   SELECT * FROM `{table_ref}` WHERE app_name = '{APP_NAME}' ORDER BY timestamp")
+        print(
+            f"   SELECT * FROM `{table_ref}` WHERE app_name = '{APP_NAME}' ORDER BY timestamp"
+        )
         return
 
     print(f"\n   Found {len(rows)} events in BigQuery:")
@@ -427,7 +497,9 @@ async def verify_bigquery(session_id: str):
         total_str = f"${row.total_amount / 100:.2f}" if row.total_amount else ""
         status_str = row.checkout_status or ""
         latency_str = f"{row.latency_ms:.0f}ms" if row.latency_ms else ""
-        print(f"   {i:<3} {row.event_type:<30} {status_str:<22} {total_str:>9} {latency_str:>8}")
+        print(
+            f"   {i:<3} {row.event_type:<30} {status_str:<22} {total_str:>9} {latency_str:>8}"
+        )
 
     # Verify key fields
     event_types = {row.event_type for row in rows}
@@ -452,8 +524,12 @@ async def verify_bigquery(session_id: str):
     has_payment_handler = any(row.payment_handler_id for row in rows)
     has_ucp_version = any(row.ucp_version for row in rows)
 
-    print(f"     [{'PASS' if has_fulfillment_amount else 'FAIL'}] fulfillment_amount extracted")
-    print(f"     [{'PASS' if has_payment_handler else 'FAIL'}] payment_handler_id extracted")
+    print(
+        f"     [{'PASS' if has_fulfillment_amount else 'FAIL'}] fulfillment_amount extracted"
+    )
+    print(
+        f"     [{'PASS' if has_payment_handler else 'FAIL'}] payment_handler_id extracted"
+    )
     print(f"     [{'PASS' if has_ucp_version else 'FAIL'}] ucp_version extracted")
 
     if not has_fulfillment_amount:
@@ -472,6 +548,7 @@ async def verify_bigquery(session_id: str):
 # ==========================================================================
 # Main
 # ==========================================================================
+
 
 async def main():
     # Create trackers — one for the server side, one for the client side

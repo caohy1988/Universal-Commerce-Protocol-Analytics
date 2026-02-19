@@ -159,8 +159,11 @@ class UCPResponseParser:
             result["line_item_count"] = len(items)
             result["line_items_json"] = json.dumps(items, default=str)
 
-        # --- ucp metadata envelope (object-keyed by reverse-domain name) ---
+        # --- ucp metadata envelope ---
         cls._extract_ucp_metadata(body.get("ucp"), result)
+
+        # --- discovery: payment.handlers at top level (sibling of ucp) ---
+        cls._extract_discovery_payment(body.get("payment"), result)
 
         # --- payment (spec: payment.instruments[], fallback: payment.handlers[]) ---
         cls._extract_payment(body, result)
@@ -237,11 +240,14 @@ class UCPResponseParser:
     def _extract_ucp_metadata(cls, ucp_meta: Any, result: Dict[str, Any]) -> None:
         """Parse the UCP metadata envelope.
 
-        The spec structures capabilities and payment_handlers as objects
-        keyed by reverse-domain name, e.g.:
-            {"dev.ucp.shopping.checkout": [{"version": "2026-01-11"}]}
+        Per the Python SDK and samples, capabilities are arrays of objects
+        with a ``name`` field::
 
-        Also handles the legacy flat-array format for backward compatibility.
+            [{"name": "dev.ucp.shopping.checkout", "version": "2026-01-11"}]
+
+        For robustness, also handles an object-keyed format where capability
+        names are dict keys (e.g. ``{"dev.ucp.shopping.checkout": [...]}``)
+        by normalizing to the array format.
         """
         if not isinstance(ucp_meta, dict):
             return
@@ -250,30 +256,44 @@ class UCPResponseParser:
 
         caps_raw = ucp_meta.get("capabilities")
         if caps_raw:
-            # Normalize: object-keyed (spec) or flat array (legacy)
             caps_list = cls._normalize_registry(caps_raw)
             if caps_list:
                 result["capabilities_json"] = json.dumps(caps_list, default=str)
 
-        # payment_handlers in the UCP metadata envelope
-        ph_raw = ucp_meta.get("payment_handlers")
-        if ph_raw and isinstance(ph_raw, dict):
-            # Flatten object-keyed payment handlers for analytics
-            ph_list = cls._normalize_registry(ph_raw)
-            if ph_list:
-                # Store first handler id if not already set
-                if "payment_handler_id" not in result and ph_list:
-                    first = ph_list[0]
-                    if isinstance(first, dict):
-                        result["payment_handler_id"] = first.get("id")
+    @classmethod
+    def _extract_discovery_payment(cls, payment: Any, result: Dict[str, Any]) -> None:
+        """Extract payment handler info from the discovery profile.
+
+        In the SDK, discovery responses place payment handlers at the
+        top level as a sibling of ``ucp``::
+
+            {"ucp": {...}, "payment": {"handlers": [...]}}
+
+        This is separate from ``_extract_payment()`` which handles
+        the ``payment`` object inside checkout/order responses.
+        """
+        if not isinstance(payment, dict):
+            return
+        handlers = payment.get("handlers")
+        if not isinstance(handlers, list) or not handlers:
+            return
+        # Only set if _extract_payment hasn't already found an instrument
+        if "payment_handler_id" not in result:
+            first = handlers[0]
+            if isinstance(first, dict):
+                result["payment_handler_id"] = first.get("id") or first.get("name")
 
     @classmethod
     def _normalize_registry(cls, raw: Any) -> list:
-        """Convert object-keyed registry to flat list for analytics storage.
+        """Normalize capabilities to a flat list for analytics storage.
 
-        Handles both formats:
-        - Spec format: {"dev.ucp.shopping.checkout": [{"version": "..."}]}
-        - Legacy format: [{"name": "dev.ucp.shopping.checkout", "version": "..."}]
+        The SDK/samples use an array format (primary)::
+
+            [{"name": "dev.ucp.shopping.checkout", "version": "2026-01-11"}]
+
+        Also handles an object-keyed dict format for robustness::
+
+            {"dev.ucp.shopping.checkout": [{"version": "2026-01-11"}]}
         """
         if isinstance(raw, list):
             return raw
@@ -283,7 +303,6 @@ class UCPResponseParser:
                 if isinstance(entries, list):
                     for entry in entries:
                         if isinstance(entry, dict):
-                            # Add the domain name so analytics can reference it
                             item = {"name": domain_name, **entry}
                             flat.append(item)
                 elif isinstance(entries, dict):
@@ -293,10 +312,12 @@ class UCPResponseParser:
 
     @classmethod
     def _extract_payment(cls, body: dict, result: Dict[str, Any]) -> None:
-        """Extract payment fields.
+        """Extract payment fields from checkout/order responses.
 
-        Spec uses payment.instruments[] (each with handler_id).
-        Falls back to legacy payment.handlers[] for backward compat.
+        The SDK ``PaymentResponse`` contains both ``handlers[]`` (merchant
+        configs) and ``instruments[]`` (buyer payment methods).  Instruments
+        are preferred for analytics since they carry ``handler_id``, ``type``,
+        and ``brand``.
         """
         payment = body.get("payment") or {}
         payment_data = body.get("payment_data") or {}
@@ -350,7 +371,7 @@ class UCPResponseParser:
         if not isinstance(fulfillment, dict):
             return
 
-        # Checkout: fulfillment.methods[]  (legacy demo format also uses this)
+        # Checkout: fulfillment.methods[]
         methods = fulfillment.get("methods")
         if isinstance(methods, list) and methods:
             first = methods[0]
@@ -358,9 +379,16 @@ class UCPResponseParser:
                 result["fulfillment_type"] = first.get("type")
                 dests = first.get("destinations", [])
                 if isinstance(dests, list) and dests:
-                    result["fulfillment_destination_country"] = dests[0].get(
-                        "address_country"
-                    )
+                    dest = dests[0]
+                    if isinstance(dest, dict):
+                        # SDK: destination is a PostalAddress (direct fields)
+                        # or has a nested address object
+                        country = dest.get("address_country")
+                        if not country:
+                            addr = dest.get("address")
+                            if isinstance(addr, dict):
+                                country = addr.get("address_country")
+                        result["fulfillment_destination_country"] = country
             return
 
         # Order: fulfillment.expectations[]
@@ -368,7 +396,14 @@ class UCPResponseParser:
         if isinstance(expectations, list) and expectations:
             first = expectations[0]
             if isinstance(first, dict):
-                result["fulfillment_type"] = first.get("type")
+                result["fulfillment_type"] = first.get("method_type") or first.get(
+                    "type"
+                )
+                dest = first.get("destination")
+                if isinstance(dest, dict):
+                    result["fulfillment_destination_country"] = dest.get(
+                        "address_country"
+                    )
 
     @classmethod
     def _extract_discounts(cls, discounts: Any, result: Dict[str, Any]) -> None:

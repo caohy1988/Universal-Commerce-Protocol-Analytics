@@ -174,7 +174,9 @@ def extract_fields(body: dict | None) -> Dict[str, Any]:
     payment_data = body.get("payment_data")
     payment = body.get("payment")
     if isinstance(payment_data, dict) and payment_data:
-        r["payment_handler_id"] = payment_data.get("handler_id") or payment_data.get("id")
+        r["payment_handler_id"] = payment_data.get("handler_id") or payment_data.get(
+            "id"
+        )
         r["payment_instrument_type"] = payment_data.get("type")
         r["payment_brand"] = payment_data.get("brand")
     elif isinstance(payment, dict) and payment:
@@ -191,7 +193,9 @@ def extract_fields(body: dict | None) -> Dict[str, Any]:
     if isinstance(ff, dict):
         methods = ff.get("methods") or ff.get("expectations") or []
         if isinstance(methods, list) and methods:
-            r["fulfillment_type"] = methods[0].get("type") or methods[0].get("method_type")
+            r["fulfillment_type"] = methods[0].get("type") or methods[0].get(
+                "method_type"
+            )
             dests = methods[0].get("destinations") or methods[0].get("destination")
             if isinstance(dests, list) and dests:
                 r["fulfillment_destination_country"] = dests[0].get("address_country")
@@ -215,6 +219,7 @@ def extract_fields(body: dict | None) -> Dict[str, Any]:
 
 
 # --- Local analytics writer ---
+
 
 class LocalAnalyticsTracker:
     """Writes to SQLite instead of BigQuery for the demo."""
@@ -330,6 +335,7 @@ async def discovery():
                     "version": UCP_VERSION,
                     "rest": {
                         "endpoint": "http://localhost:8199/",
+                        "schema": "http://localhost:8199/openapi.json",
                     },
                 },
             },
@@ -362,7 +368,11 @@ async def create_checkout(request: Request):
         qty = item.get("quantity", 1)
         li = {
             "id": f"li_{uuid.uuid4().hex[:8]}",
-            "item": {"id": product_id, "title": product["title"], "price": product["price"]},
+            "item": {
+                "id": product_id,
+                "title": product["title"],
+                "price": product["price"],
+            },
             "quantity": qty,
         }
         line_items.append(li)
@@ -384,6 +394,13 @@ async def create_checkout(request: Request):
         ],
         "buyer": body.get("buyer", {}),
         "payment": {
+            "handlers": [
+                {
+                    "id": "mock_payment_handler",
+                    "name": "Mock Payment Handler",
+                    "version": UCP_VERSION,
+                },
+            ],
             "instruments": [
                 {
                     "id": "instr_card",
@@ -420,7 +437,9 @@ async def update_checkout(session_id: str, request: Request):
         shipping = 599
         session["totals"].append({"type": "fulfillment", "amount": shipping})
         # Recalculate total
-        subtotal = next(t["amount"] for t in session["totals"] if t["type"] == "subtotal")
+        subtotal = next(
+            t["amount"] for t in session["totals"] if t["type"] == "subtotal"
+        )
         tax = next(t["amount"] for t in session["totals"] if t["type"] == "tax")
         session["totals"] = [t for t in session["totals"] if t["type"] != "total"]
         session["totals"].append({"type": "total", "amount": subtotal + tax + shipping})
@@ -458,7 +477,12 @@ async def complete_checkout(session_id: str, request: Request):
     if not payment_data:
         session["status"] = "requires_escalation"
         session["messages"] = [
-            {"type": "error", "code": "missing_payment", "content": "Payment data required", "severity": "escalation"},
+            {
+                "type": "error",
+                "code": "missing_payment",
+                "content": "Payment data required",
+                "severity": "escalation",
+            },
         ]
         SESSIONS[session_id] = session
         return JSONResponse(session, status_code=400)
@@ -488,7 +512,10 @@ async def simulate_shipping(order_id: str):
         return JSONResponse({"error": "not_found"}, status_code=404)
 
     ORDERS[order_id]["status"] = "shipped"
-    ORDERS[order_id]["tracking"] = {"carrier": "USPS", "tracking_number": "9400111899223456789012"}
+    ORDERS[order_id]["tracking"] = {
+        "carrier": "USPS",
+        "tracking_number": "9400111899223456789012",
+    }
 
     return JSONResponse(ORDERS[order_id])
 
@@ -496,6 +523,7 @@ async def simulate_shipping(order_id: str):
 # ==========================================================================
 # PART 2: Analytics-Instrumented HTTPX Client (Agent Side)
 # ==========================================================================
+
 
 async def run_shopping_agent(tracker: LocalAnalyticsTracker):
     """Simulate a full shopping agent journey with analytics."""
@@ -511,7 +539,6 @@ async def run_shopping_agent(tracker: LocalAnalyticsTracker):
             "Content-Type": "application/json",
         },
     ) as client:
-
         # ------------------------------------------------------------------
         # Step 1: Discovery
         # ------------------------------------------------------------------
@@ -521,12 +548,16 @@ async def run_shopping_agent(tracker: LocalAnalyticsTracker):
         latency = round((time.monotonic() - start) * 1000, 2)
         profile = resp.json()
 
-        tracker.record_http("GET", "/.well-known/ucp", resp.status_code, profile, latency)
+        tracker.record_http(
+            "GET", "/.well-known/ucp", resp.status_code, profile, latency
+        )
 
         caps = [c["name"] for c in profile["ucp"]["capabilities"]]
         print(f"   UCP version: {profile['ucp']['version']}")
         print(f"   Capabilities: {caps}")
-        print(f"   Payment handlers: {[h['id'] for h in profile['payment']['handlers']]}")
+        print(
+            f"   Payment handlers: {[h['id'] for h in profile['payment']['handlers']]}"
+        )
         print(f"   ⏱  {latency}ms")
 
         # ------------------------------------------------------------------
@@ -553,7 +584,11 @@ async def run_shopping_agent(tracker: LocalAnalyticsTracker):
         checkout = resp.json()
 
         tracker.record_http(
-            "POST", "/checkout-sessions", resp.status_code, checkout, latency,
+            "POST",
+            "/checkout-sessions",
+            resp.status_code,
+            checkout,
+            latency,
             dict(resp.request.headers),
         )
 
@@ -579,18 +614,20 @@ async def run_shopping_agent(tracker: LocalAnalyticsTracker):
                     "phone": "555-123-4567",
                 },
                 "fulfillment": {
-                    "methods": [
+                    "expectations": [
                         {
                             "id": "ship_standard",
-                            "type": "shipping",
-                            "destinations": [
-                                {
-                                    "id": "home",
-                                    "address_country": "US",
-                                    "address_region": "CA",
-                                    "postal_code": "94043",
-                                    "street_address": "123 Main St",
-                                }
+                            "method_type": "shipping",
+                            "destination": {
+                                "id": "home",
+                                "address_country": "US",
+                                "address_region": "CA",
+                                "postal_code": "94043",
+                                "street_address": "123 Main St",
+                            },
+                            "line_items": [
+                                {"item_id": "bouquet_roses", "quantity": 2},
+                                {"item_id": "sunflower_bunch", "quantity": 1},
                             ],
                         }
                     ]
@@ -601,14 +638,22 @@ async def run_shopping_agent(tracker: LocalAnalyticsTracker):
         updated = resp.json()
 
         tracker.record_http(
-            "PUT", f"/checkout-sessions/{session_id}", resp.status_code, updated, latency,
+            "PUT",
+            f"/checkout-sessions/{session_id}",
+            resp.status_code,
+            updated,
+            latency,
         )
 
         total = next(t["amount"] for t in updated["totals"] if t["type"] == "total")
         print(f"   Status: {updated['status']}")
         print(f"   Total (with shipping): ${total / 100:.2f}")
-        print(f"   Fulfillment: {updated['fulfillment']['methods'][0]['type']}")
-        print(f"   Destination: {updated['fulfillment']['methods'][0]['destinations'][0]['address_country']}")
+        print(
+            f"   Fulfillment: {updated['fulfillment']['expectations'][0]['method_type']}"
+        )
+        print(
+            f"   Destination: {updated['fulfillment']['expectations'][0]['destination']['address_country']}"
+        )
         print(f"   ⏱  {latency}ms")
 
         # ------------------------------------------------------------------
@@ -624,11 +669,17 @@ async def run_shopping_agent(tracker: LocalAnalyticsTracker):
         discounted = resp.json()
 
         tracker.record_http(
-            "PUT", f"/checkout-sessions/{session_id}", resp.status_code, discounted, latency,
+            "PUT",
+            f"/checkout-sessions/{session_id}",
+            resp.status_code,
+            discounted,
+            latency,
         )
 
         total = next(t["amount"] for t in discounted["totals"] if t["type"] == "total")
-        discount = next((t["amount"] for t in discounted["totals"] if t["type"] == "discount"), 0)
+        discount = next(
+            (t["amount"] for t in discounted["totals"] if t["type"] == "discount"), 0
+        )
         print(f"   Discount applied: -${discount / 100:.2f}")
         print(f"   New total: ${total / 100:.2f}")
         print(f"   ⏱  {latency}ms")
@@ -659,14 +710,19 @@ async def run_shopping_agent(tracker: LocalAnalyticsTracker):
         completed = resp.json()
 
         tracker.record_http(
-            "POST", f"/checkout-sessions/{session_id}/complete",
-            resp.status_code, completed, latency,
+            "POST",
+            f"/checkout-sessions/{session_id}/complete",
+            resp.status_code,
+            completed,
+            latency,
             dict(resp.request.headers),
         )
 
         print(f"   Status: {completed['status']}")
         print(f"   Order ID: {completed.get('order_id')}")
-        print(f"   Payment: {completed['payment_data']['brand']} ****{completed['payment_data']['last_digits']}")
+        print(
+            f"   Payment: {completed['payment_data']['brand']} ****{completed['payment_data']['last_digits']}"
+        )
         print(f"   ⏱  {latency}ms")
 
         order_id = completed["order_id"]
@@ -681,8 +737,11 @@ async def run_shopping_agent(tracker: LocalAnalyticsTracker):
         shipped = resp.json()
 
         tracker.record_http(
-            "POST", f"/testing/simulate-shipping/{order_id}",
-            resp.status_code, shipped, latency,
+            "POST",
+            f"/testing/simulate-shipping/{order_id}",
+            resp.status_code,
+            shipped,
+            latency,
         )
 
         print(f"   Order status: {shipped['status']}")
@@ -696,6 +755,7 @@ async def run_shopping_agent(tracker: LocalAnalyticsTracker):
 # ==========================================================================
 # PART 3: Analytics Report (query the local SQLite)
 # ==========================================================================
+
 
 def print_analytics_report(conn: sqlite3.Connection, session_id: str):
     """Print captured analytics like you'd see in BigQuery."""
@@ -721,7 +781,9 @@ def print_analytics_report(conn: sqlite3.Connection, session_id: str):
         total_str = f"${total / 100:.2f}" if total else ""
         status_str = status or ""
         latency_str = f"{latency:.0f}ms" if latency else ""
-        print(f"{i:<3} {event_type:<30} {status_str:<22} {total_str:>9} {latency_str:>8}")
+        print(
+            f"{i:<3} {event_type:<30} {status_str:<22} {total_str:>9} {latency_str:>8}"
+        )
 
     # --- Checkout funnel ---
     print("\n── Checkout Funnel ─────────────────────────────────────────")
@@ -802,7 +864,9 @@ def print_analytics_report(conn: sqlite3.Connection, session_id: str):
     print(f"   {'Event Type':<30} {'Calls':>5} {'Min':>8} {'Avg':>8} {'Max':>8}")
     print("   " + "─" * 63)
     for event_type, calls, min_ms, avg_ms, max_ms in cursor.fetchall():
-        print(f"   {event_type:<30} {calls:>5} {min_ms:>7.1f} {avg_ms:>7.1f} {max_ms:>7.1f}")
+        print(
+            f"   {event_type:<30} {calls:>5} {min_ms:>7.1f} {avg_ms:>7.1f} {max_ms:>7.1f}"
+        )
 
     # --- Total events ---
     cursor = conn.execute("SELECT COUNT(*) FROM ucp_events")
@@ -811,7 +875,8 @@ def print_analytics_report(conn: sqlite3.Connection, session_id: str):
 
     # --- Equivalent BigQuery queries ---
     print("\n── Equivalent BigQuery Queries ─────────────────────────────")
-    print("""
+    print(
+        """
     -- Checkout funnel
     SELECT event_type, COUNT(*) as cnt
     FROM `my-project.ucp_analytics.ucp_events`
@@ -823,15 +888,18 @@ def print_analytics_report(conn: sqlite3.Connection, session_id: str):
     FROM `my-project.ucp_analytics.ucp_events`
     WHERE event_type = 'checkout_session_completed'
     GROUP BY merchant_host;
-    """.replace("{session_id}", session_id))
+    """.replace("{session_id}", session_id)
+    )
 
 
 # ==========================================================================
 # PART 4: Main — wire everything together
 # ==========================================================================
 
+
 async def main():
     import os
+
     # Clean up previous run
     if os.path.exists(DB_PATH):
         os.remove(DB_PATH)
