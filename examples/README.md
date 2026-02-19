@@ -157,7 +157,7 @@ Every event row includes:
 | `payment_handler_id` | `com.mock.payment` | From `payment.instruments[0].handler_id` |
 | `payment_instrument_type` | `card` | From `payment.instruments[0].type` |
 | `ucp_version` | `2026-01-11` | From `ucp.version` |
-| `capabilities_json` | `[{"name":"dev.ucp.shopping.checkout",...}]` | Flattened from object-keyed `ucp.capabilities` |
+| `capabilities_json` | `[{"name":"dev.ucp.shopping.checkout",...}]` | From `ucp.capabilities` array (per SDK: array of `{name, version}` objects) |
 | `discount_codes_json` | `["FLOWERS10"]` | From `discounts.codes` |
 | `discount_applied_json` | `[{"code":"FLOWERS10","amount":500,...}]` | From `discounts.applied` |
 | `permalink_url` | `https://shop.example.com/orders/...` | From `order.permalink_url` |

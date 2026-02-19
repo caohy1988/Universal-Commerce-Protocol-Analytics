@@ -114,17 +114,18 @@ class TestClassify:
 
 
 class TestExtract:
-    # Sample checkout response using spec-aligned format
+    # Sample checkout response using SDK/samples-aligned format
     SAMPLE_CHECKOUT_RESPONSE = {
         "ucp": {
             "version": "2026-01-11",
-            "capabilities": {
-                "dev.ucp.shopping.checkout": [{"version": "2026-01-11"}],
-                "dev.ucp.shopping.fulfillment": [{"version": "2026-01-11"}],
-            },
-            "payment_handlers": {
-                "com.google.pay": [{"version": "2026-01-11"}],
-            },
+            "capabilities": [
+                {"name": "dev.ucp.shopping.checkout", "version": "2026-01-11"},
+                {
+                    "name": "dev.ucp.shopping.fulfillment",
+                    "version": "2026-01-11",
+                    "extends": "dev.ucp.shopping.checkout",
+                },
+            ],
         },
         "id": "chk_abc123",
         "status": "ready_for_complete",
@@ -147,21 +148,38 @@ class TestExtract:
             {"type": "total", "amount": 5999},
         ],
         "payment": {
+            "handlers": [
+                {
+                    "id": "google_pay",
+                    "name": "com.google.pay",
+                    "version": "2026-01-11",
+                    "spec": "https://example.com/spec",
+                    "config_schema": "https://example.com/schema",
+                    "instrument_schemas": [],
+                    "config": {},
+                },
+            ],
             "instruments": [
                 {
                     "id": "instr_1",
-                    "handler_id": "com.google.pay",
+                    "handler_id": "google_pay",
                     "type": "wallet",
                     "brand": "google_pay",
                 },
-            ]
+            ],
         },
         "fulfillment": {
             "methods": [
                 {
+                    "id": "method_1",
                     "type": "shipping",
+                    "line_item_ids": ["li_1"],
                     "destinations": [
-                        {"address_country": "US", "postal_code": "94043"},
+                        {
+                            "id": "dest_1",
+                            "address_country": "US",
+                            "postal_code": "94043",
+                        },
                     ],
                 }
             ]
@@ -195,7 +213,7 @@ class TestExtract:
         assert fields["total_amount"] == 5999
         assert fields["line_item_count"] == 1
         assert fields["ucp_version"] == "2026-01-11"
-        assert fields["payment_handler_id"] == "com.google.pay"
+        assert fields["payment_handler_id"] == "google_pay"
         assert fields["payment_instrument_type"] == "wallet"
         assert fields["fulfillment_type"] == "shipping"
         assert fields["fulfillment_destination_country"] == "US"
@@ -203,8 +221,8 @@ class TestExtract:
         assert fields["error_severity"] == "recoverable"
         assert fields["expires_at"] == "2026-01-12T00:00:00Z"
 
-    def test_extract_capabilities_object_keyed(self):
-        """Spec: capabilities are keyed by reverse-domain name."""
+    def test_extract_capabilities_array(self):
+        """SDK/samples: capabilities are an array with name fields."""
         fields = UCPResponseParser.extract(self.SAMPLE_CHECKOUT_RESPONSE)
         assert "capabilities_json" in fields
         caps = json.loads(fields["capabilities_json"])
@@ -212,24 +230,22 @@ class TestExtract:
         assert "dev.ucp.shopping.checkout" in names
         assert "dev.ucp.shopping.fulfillment" in names
 
-    def test_extract_capabilities_legacy_array(self):
-        """Backward compat: capabilities as flat array (demo/samples format)."""
+    def test_extract_capabilities_object_keyed_compat(self):
+        """Robustness: object-keyed capabilities are normalized to array."""
         body = {
             "ucp": {
                 "version": "2026-01-11",
-                "capabilities": [
-                    {"name": "dev.ucp.shopping.checkout", "version": "2026-01-11"},
-                    {
-                        "name": "dev.ucp.shopping.fulfillment",
-                        "version": "2026-01-11",
-                        "extends": "dev.ucp.shopping.checkout",
-                    },
-                ],
+                "capabilities": {
+                    "dev.ucp.shopping.checkout": [{"version": "2026-01-11"}],
+                    "dev.ucp.shopping.fulfillment": [{"version": "2026-01-11"}],
+                },
             },
         }
         fields = UCPResponseParser.extract(body)
         caps = json.loads(fields["capabilities_json"])
         assert len(caps) == 2
+        names = [c["name"] for c in caps]
+        assert "dev.ucp.shopping.checkout" in names
 
     def test_extract_payment_instruments(self):
         """Spec: payment.instruments[] with handler_id."""
@@ -250,17 +266,48 @@ class TestExtract:
         assert fields["payment_instrument_type"] == "card"
         assert fields["payment_brand"] == "visa"
 
-    def test_extract_payment_legacy_handlers(self):
-        """Backward compat: payment.handlers[] (demo format)."""
+    def test_extract_payment_handlers_only(self):
+        """Checkout payment with only handlers (no instruments selected yet)."""
         body = {
             "payment": {
                 "handlers": [
-                    {"id": "gpay", "type": "wallet", "brand": "google_pay"},
+                    {
+                        "id": "gpay",
+                        "name": "google.pay",
+                        "version": "2026-01-11",
+                        "spec": "https://example.com",
+                        "config_schema": "https://example.com",
+                        "instrument_schemas": [],
+                        "config": {},
+                    },
                 ]
             }
         }
         fields = UCPResponseParser.extract(body)
         assert fields["payment_handler_id"] == "gpay"
+
+    def test_extract_discovery_payment_handlers(self):
+        """SDK: discovery has payment.handlers at top level (sibling of ucp)."""
+        body = {
+            "ucp": {
+                "version": "2026-01-11",
+                "capabilities": [
+                    {"name": "dev.ucp.shopping.checkout", "version": "2026-01-11"},
+                ],
+            },
+            "payment": {
+                "handlers": [
+                    {
+                        "id": "mock_handler",
+                        "name": "com.mock.payment",
+                        "version": "2026-01-11",
+                    },
+                ],
+            },
+        }
+        fields = UCPResponseParser.extract(body)
+        assert fields["payment_handler_id"] == "mock_handler"
+        assert fields["ucp_version"] == "2026-01-11"
 
     def test_extract_payment_data(self):
         """payment_data from complete request/response."""
@@ -313,7 +360,15 @@ class TestExtract:
             "permalink_url": "https://shop.example.com/orders/order_xyz",
             "fulfillment": {
                 "expectations": [
-                    {"type": "delivery", "status": "shipped"},
+                    {
+                        "method_type": "shipping",
+                        "status": "shipped",
+                        "destination": {
+                            "address_country": "US",
+                            "postal_code": "94043",
+                        },
+                        "line_items": [{"id": "li_1", "quantity": 1}],
+                    },
                 ],
             },
         }
@@ -321,7 +376,8 @@ class TestExtract:
         assert fields["order_id"] == "order_xyz"
         assert fields["checkout_session_id"] == "chk_abc"
         assert fields["permalink_url"] == ("https://shop.example.com/orders/order_xyz")
-        assert fields["fulfillment_type"] == "delivery"
+        assert fields["fulfillment_type"] == "shipping"
+        assert fields["fulfillment_destination_country"] == "US"
 
     def test_extract_totals_all_spec_types(self):
         """All 7 spec total types are extracted."""

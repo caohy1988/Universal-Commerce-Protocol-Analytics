@@ -40,14 +40,17 @@ APP_NAME = "bq_adk_demo"
 # Simulated ADK Tool Interface
 # ==========================================================================
 
+
 class MockTool:
     """Simulates an ADK tool object."""
+
     def __init__(self, name: str):
         self.name = name
 
 
 class MockToolContext:
     """Simulates an ADK tool context."""
+
     def __init__(self, app_name: str = APP_NAME):
         self.app_name = app_name
         self._id = id(self)  # unique per invocation
@@ -57,41 +60,61 @@ class MockToolContext:
 # Simulated UCP Tool Results (spec-aligned)
 # ==========================================================================
 
+PAYMENT_HANDLERS = [
+    {
+        "id": "mock_payment_handler",
+        "name": "com.mock.payment",
+        "version": "2026-01-11",
+        "spec": "https://ucp.dev/specs/mock",
+        "config_schema": "https://ucp.dev/schemas/mock.json",
+        "instrument_schemas": [],
+        "config": {},
+    },
+]
+
 DISCOVERY_RESULT = {
     "ucp": {
         "version": "2026-01-11",
         "services": {
-            "dev.ucp.shopping": [
-                {"version": "2026-01-11", "transport": "rest",
-                 "endpoint": "https://flower-shop.example.com/"},
-            ],
+            "dev.ucp.shopping": {
+                "version": "2026-01-11",
+                "spec": "https://ucp.dev/specs/shopping",
+                "rest": {
+                    "schema": "https://ucp.dev/services/shopping/openapi.json",
+                    "endpoint": "https://flower-shop.example.com",
+                },
+            },
         },
-        "capabilities": {
-            "dev.ucp.shopping.checkout": [{"version": "2026-01-11"}],
-            "dev.ucp.shopping.fulfillment": [{"version": "2026-01-11"}],
-        },
-        "payment_handlers": {
-            "com.mock.payment": [{"version": "2026-01-11"}],
-        },
+        "capabilities": [
+            {"name": "dev.ucp.shopping.checkout", "version": "2026-01-11"},
+            {
+                "name": "dev.ucp.shopping.fulfillment",
+                "version": "2026-01-11",
+                "extends": "dev.ucp.shopping.checkout",
+            },
+        ],
+    },
+    "payment": {
+        "handlers": PAYMENT_HANDLERS,
     },
 }
 
 CHECKOUT_CREATED_RESULT = {
     "ucp": {
         "version": "2026-01-11",
-        "capabilities": {
-            "dev.ucp.shopping.checkout": [{"version": "2026-01-11"}],
-        },
-        "payment_handlers": {
-            "com.mock.payment": [{"version": "2026-01-11"}],
-        },
+        "capabilities": [
+            {"name": "dev.ucp.shopping.checkout", "version": "2026-01-11"},
+        ],
     },
     "id": f"chk_adk_{uuid.uuid4().hex[:8]}",
     "status": "incomplete",
     "currency": "USD",
     "line_items": [
-        {"id": "li_1", "item": {"id": "roses", "title": "Red Roses", "price": 2999},
-         "quantity": 1},
+        {
+            "id": "li_1",
+            "item": {"id": "roses", "title": "Red Roses", "price": 2999},
+            "quantity": 1,
+        },
     ],
     "totals": [
         {"type": "subtotal", "amount": 2999},
@@ -99,9 +122,14 @@ CHECKOUT_CREATED_RESULT = {
         {"type": "total", "amount": 3261},
     ],
     "payment": {
+        "handlers": PAYMENT_HANDLERS,
         "instruments": [
-            {"id": "instr_1", "handler_id": "com.mock.payment",
-             "type": "card", "brand": "Visa"},
+            {
+                "id": "instr_1",
+                "handler_id": "mock_payment_handler",
+                "type": "card",
+                "brand": "Visa",
+            },
         ],
     },
     "messages": [],
@@ -113,8 +141,14 @@ CHECKOUT_UPDATED_RESULT = {
     "status": "ready_for_complete",
     "fulfillment": {
         "methods": [
-            {"type": "shipping",
-             "destinations": [{"address_country": "US", "postal_code": "94043"}]},
+            {
+                "id": "method_1",
+                "type": "shipping",
+                "line_item_ids": ["li_1"],
+                "destinations": [
+                    {"id": "dest_1", "address_country": "US", "postal_code": "94043"},
+                ],
+            },
         ],
     },
     "totals": [
@@ -145,11 +179,22 @@ ORDER_SHIPPED_RESULT = {
     "totals": CHECKOUT_UPDATED_RESULT["totals"],
     "fulfillment": {
         "expectations": [
-            {"type": "delivery", "status": "shipped"},
+            {
+                "id": "exp_1",
+                "method_type": "shipping",
+                "destination": {"address_country": "US", "postal_code": "94043"},
+                "line_items": [{"id": "li_1", "quantity": 1}],
+            },
         ],
         "events": [
-            {"type": "shipped", "tracking_number": "94001118992234",
-             "carrier": "USPS"},
+            {
+                "id": "evt_1",
+                "type": "shipped",
+                "tracking_number": "94001118992234",
+                "carrier": "USPS",
+                "occurred_at": "2026-02-19T10:00:00Z",
+                "line_items": [{"id": "li_1", "quantity": 1}],
+            },
         ],
     },
 }
@@ -158,6 +203,7 @@ ORDER_SHIPPED_RESULT = {
 # ==========================================================================
 # Run simulated ADK tool flow
 # ==========================================================================
+
 
 async def simulate_tool_call(
     plugin: UCPAgentAnalyticsPlugin,
@@ -171,14 +217,19 @@ async def simulate_tool_call(
     ctx = MockToolContext()
 
     await plugin.before_tool_callback(
-        tool=tool, tool_args=tool_args, tool_context=ctx,
+        tool=tool,
+        tool_args=tool_args,
+        tool_context=ctx,
     )
 
     # Simulate tool execution time
     await asyncio.sleep(delay_ms / 1000)
 
     await plugin.after_tool_callback(
-        tool=tool, tool_args=tool_args, tool_context=ctx, result=result,
+        tool=tool,
+        tool_args=tool_args,
+        tool_context=ctx,
+        result=result,
     )
 
     return result
@@ -204,16 +255,22 @@ async def run_adk_demo():
     # Step 1: Discovery
     print("\n-- Step 1: discover_merchant --")
     await simulate_tool_call(
-        plugin, "discover_merchant", {}, DISCOVERY_RESULT, delay_ms=30,
+        plugin,
+        "discover_merchant",
+        {},
+        DISCOVERY_RESULT,
+        delay_ms=30,
     )
     print("   Captured discovery event")
 
     # Step 2: Create checkout
     print("\n-- Step 2: create_checkout --")
     await simulate_tool_call(
-        plugin, "create_checkout",
+        plugin,
+        "create_checkout",
         {"line_items": [{"item_id": "roses", "quantity": 1}]},
-        CHECKOUT_CREATED_RESULT, delay_ms=80,
+        CHECKOUT_CREATED_RESULT,
+        delay_ms=80,
     )
     print(f"   Session: {session_id}")
     print(f"   Status: {CHECKOUT_CREATED_RESULT['status']}")
@@ -221,18 +278,22 @@ async def run_adk_demo():
     # Step 3: Update checkout
     print("\n-- Step 3: update_checkout --")
     await simulate_tool_call(
-        plugin, "update_checkout",
+        plugin,
+        "update_checkout",
         {"session_id": session_id, "buyer": {"email": "jane@example.com"}},
-        CHECKOUT_UPDATED_RESULT, delay_ms=60,
+        CHECKOUT_UPDATED_RESULT,
+        delay_ms=60,
     )
     print(f"   Status: {CHECKOUT_UPDATED_RESULT['status']}")
 
     # Step 4: Complete checkout
     print("\n-- Step 4: complete_checkout --")
     await simulate_tool_call(
-        plugin, "complete_checkout",
+        plugin,
+        "complete_checkout",
         {"session_id": session_id, "payment_instrument": "instr_1"},
-        CHECKOUT_COMPLETED_RESULT, delay_ms=120,
+        CHECKOUT_COMPLETED_RESULT,
+        delay_ms=120,
     )
     print(f"   Status: {CHECKOUT_COMPLETED_RESULT['status']}")
     print(f"   Order: {ORDER_ID}")
@@ -240,7 +301,8 @@ async def run_adk_demo():
     # Step 5: Non-UCP tool (should be skipped)
     print("\n-- Step 5: get_weather (non-UCP, should be skipped) --")
     await simulate_tool_call(
-        plugin, "get_weather",
+        plugin,
+        "get_weather",
         {"location": "San Francisco"},
         {"temperature": 68, "condition": "sunny"},
         delay_ms=20,
@@ -282,7 +344,9 @@ async def verify_adk_bigquery(session_id: str):
 
     if not rows:
         print("\n   WARNING: No rows found yet. Streaming buffer delay (~90s).")
-        print(f"   Run manually: SELECT * FROM `{table_ref}` WHERE app_name = '{APP_NAME}'")
+        print(
+            f"   Run manually: SELECT * FROM `{table_ref}` WHERE app_name = '{APP_NAME}'"
+        )
         client.close()
         return
 
@@ -294,7 +358,9 @@ async def verify_adk_bigquery(session_id: str):
         total_str = f"${row.total_amount / 100:.2f}" if row.total_amount else ""
         status_str = row.checkout_status or ""
         latency_str = f"{row.latency_ms:.0f}ms" if row.latency_ms else ""
-        print(f"   {i:<3} {row.event_type:<30} {status_str:<22} {total_str:>9} {latency_str:>8}")
+        print(
+            f"   {i:<3} {row.event_type:<30} {status_str:<22} {total_str:>9} {latency_str:>8}"
+        )
 
     event_types = {row.event_type for row in rows}
     print(f"\n   Event types: {sorted(event_types)}")
@@ -302,14 +368,20 @@ async def verify_adk_bigquery(session_id: str):
     # Verify only UCP events (not get_weather)
     print("\n   Verification:")
     checks = [
-        ("request" in event_types or "profile_discovered" in event_types,
-         "Discovery event captured"),
-        ("checkout_session_created" in event_types,
-         "Checkout created captured"),
-        ("checkout_session_updated" in event_types or "checkout_session_completed" in event_types,
-         "Checkout lifecycle captured"),
-        (not any("weather" in (row.event_type or "") for row in rows),
-         "Non-UCP tool correctly skipped"),
+        (
+            "request" in event_types or "profile_discovered" in event_types,
+            "Discovery event captured",
+        ),
+        ("checkout_session_created" in event_types, "Checkout created captured"),
+        (
+            "checkout_session_updated" in event_types
+            or "checkout_session_completed" in event_types,
+            "Checkout lifecycle captured",
+        ),
+        (
+            not any("weather" in (row.event_type or "") for row in rows),
+            "Non-UCP tool correctly skipped",
+        ),
     ]
 
     all_ok = True
@@ -320,7 +392,9 @@ async def verify_adk_bigquery(session_id: str):
         print(f"     [{status}] {label}")
 
     has_latency = any(row.latency_ms and row.latency_ms > 0 for row in rows)
-    print(f"     [{'PASS' if has_latency else 'FAIL'}] Latency captured from tool timing")
+    print(
+        f"     [{'PASS' if has_latency else 'FAIL'}] Latency captured from tool timing"
+    )
     if not has_latency:
         all_ok = False
 

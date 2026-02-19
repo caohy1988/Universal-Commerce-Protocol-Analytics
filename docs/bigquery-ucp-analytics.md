@@ -417,7 +417,7 @@ are defined by the UCP spec:
 | Field | Type | Mode | Description |
 |---|---|---|---|
 | `ucp_version` | `STRING` | `NULLABLE` | UCP protocol version (e.g., `2026-01-11`) |
-| `capabilities_json` | `JSON` | `NULLABLE` | Flattened capabilities array (from object-keyed `ucp.capabilities`) |
+| `capabilities_json` | `JSON` | `NULLABLE` | Capabilities array from `ucp.capabilities` (per SDK: array of `{name, version}` objects) |
 | `extensions_json` | `JSON` | `NULLABLE` | Extensions metadata |
 
 ### Identity Linking
