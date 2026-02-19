@@ -25,6 +25,7 @@ from typing import Dict
 
 import httpx
 import uvicorn
+from _demo_utils import DATASET_ID, PROJECT_ID, TABLE_ID
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
@@ -40,9 +41,6 @@ from ucp_analytics import (
 # Config
 # ==========================================================================
 
-PROJECT_ID = "test-project-0728-467323"
-DATASET_ID = "ucp_analytics"
-TABLE_ID = "ucp_events"
 APP_NAME = "bq_demo"
 
 # ==========================================================================

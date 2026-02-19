@@ -12,6 +12,7 @@ All demo scripts import from here to avoid code duplication.
 from __future__ import annotations
 
 import asyncio
+import os
 
 from ucp_analytics import UCPAnalyticsTracker
 
@@ -19,7 +20,7 @@ from ucp_analytics import UCPAnalyticsTracker
 # BigQuery configuration — update PROJECT_ID for your GCP project
 # ======================================================================
 
-PROJECT_ID = "test-project-0728-467323"  # <-- change this
+PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "your-gcp-project-id")
 DATASET_ID = "ucp_analytics"
 TABLE_ID = "ucp_events"
 
