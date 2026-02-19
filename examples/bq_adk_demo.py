@@ -24,6 +24,8 @@ import json
 import uuid
 from typing import Dict
 
+from _demo_utils import DATASET_ID, PROJECT_ID, TABLE_ID
+
 from ucp_analytics import UCPAnalyticsTracker, UCPEvent, UCPEventType
 from ucp_analytics.adk_plugin import UCPAgentAnalyticsPlugin
 
@@ -31,9 +33,6 @@ from ucp_analytics.adk_plugin import UCPAgentAnalyticsPlugin
 # Config
 # ==========================================================================
 
-PROJECT_ID = "test-project-0728-467323"
-DATASET_ID = "ucp_analytics"
-TABLE_ID = "ucp_events"
 APP_NAME = "bq_adk_demo"
 
 ALL_27_EVENT_TYPES = sorted(e.value for e in UCPEventType)
