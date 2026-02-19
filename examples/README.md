@@ -29,7 +29,7 @@ python examples/e2e_demo.py
 ```bash
 gcloud auth application-default login
 uv sync --all-extras
-# Edit PROJECT_ID in examples/_demo_utils.py
+export GCP_PROJECT_ID="your-gcp-project-id"
 uv run python examples/scenarios_demo.py    # errors + edge cases
 uv run python examples/cart_demo.py          # cart lifecycle
 uv run python examples/order_lifecycle_demo.py  # order lifecycle
@@ -59,10 +59,10 @@ uv run python examples/identity_payment_demo.py  # identity + payment
 
 4. **Configuration:**
 
-   Open `examples/_demo_utils.py` and update the project ID:
+   Set the `GCP_PROJECT_ID` environment variable:
 
-   ```python
-   PROJECT_ID = "your-gcp-project-id"    # <-- change this
+   ```bash
+   export GCP_PROJECT_ID="your-gcp-project-id"
    ```
 
 ---
@@ -90,7 +90,7 @@ across all 3 transports.
 ### Run
 
 ```bash
-# Edit PROJECT_ID in examples/bq_demo.py
+export GCP_PROJECT_ID="your-gcp-project-id"
 uv run python examples/bq_demo.py
 ```
 
@@ -131,7 +131,7 @@ After all phases, BigQuery is queried to verify all 27 event types are present.
 ### Run
 
 ```bash
-# Edit PROJECT_ID in examples/bq_adk_demo.py
+export GCP_PROJECT_ID="your-gcp-project-id"
 uv run python examples/bq_adk_demo.py
 ```
 
