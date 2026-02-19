@@ -19,7 +19,7 @@
 7. [Async BigQuery Writer](#7-async-bigquery-writer)
 8. [Integration Patterns](#8-integration-patterns)
 9. [Analytics Queries](#9-analytics-queries)
-10. [End-to-End Demo](#10-end-to-end-demo)
+10. [Examples](#10-examples)
 11. [Deployment & Configuration](#11-deployment--configuration)
 12. [Relationship to Existing Work](#12-relationship-to-existing-work)
 13. [Future Work](#13-future-work)
@@ -62,7 +62,7 @@ UCP was publicly launched in January 2026, co-developed by Google, Shopify, Etsy
 - Real-time alerting (use existing GCP monitoring on top of BigQuery)
 - PCI-DSS compliant payment storage (only handler IDs and card brands captured, not tokens/credentials)
 - Replacing merchant transaction databases (analytics layer, not system of record)
-- Non-REST transports in v0.1 (MCP and A2A hooks are future work)
+- Non-HTTP transports beyond the current JSON-RPC classification (e.g. native gRPC bindings)
 
 ---
 
@@ -70,7 +70,11 @@ UCP was publicly launched in January 2026, co-developed by Google, Shopify, Etsy
 
 ### 3.1 System Overview
 
-UCP Analytics hooks into the HTTP transport layer — the primary and most widely-deployed UCP binding. It operates as a passive observer: intercepting requests/responses without modifying them, extracting structured UCP fields, and writing batched event rows to BigQuery.
+UCP Analytics hooks into the transport layer as a passive observer: intercepting requests/responses without modifying them, extracting structured UCP fields, and writing batched event rows to BigQuery. It supports three transports:
+
+- **REST** — HTTP method + path + response body classification (primary binding)
+- **MCP** — JSON-RPC tool name classification via `record_jsonrpc(transport="mcp")`
+- **A2A** — JSON-RPC tool name classification via `record_jsonrpc(transport="a2a")`
 
 ```
 Platform (Agent)                    Business (Merchant)
@@ -83,6 +87,7 @@ Platform (Agent)                    Business (Merchant)
                             v
                   UCPAnalyticsTracker
                   +--UCPResponseParser   (classify + extract)
+                  +--classify_jsonrpc()  (MCP/A2A tool mapping)
                   +--AsyncBigQueryWriter (batch + flush)
                             |
                             v
@@ -99,7 +104,8 @@ Platform (Agent)                    Business (Merchant)
 | **FastAPI Middleware** | Merchant server | ASGI middleware on Starlette | Track all inbound UCP requests |
 | **HTTPX Event Hook** | Agent / platform | httpx response event hook | Track all outbound UCP calls |
 | **ADK Plugin** (optional) | ADK agent | BasePlugin before/after callbacks | For ADK-based commerce agents |
-| **Direct API** | Any | `tracker.record_http()` | Custom integrations, testing |
+| **JSON-RPC recorder** | MCP / A2A agent | `tracker.record_jsonrpc()` | Track MCP and A2A tool calls |
+| **Direct API** | Any | `tracker.record_http()` / `tracker.record_event()` | Custom integrations, testing |
 
 ### 3.3 Data Flow
 
@@ -120,31 +126,91 @@ The core package depends only on `google-cloud-bigquery` and `httpx`. Optional i
 
 ## 4. Event Classification
 
-### 4.1 Event Type Mapping
+### 4.1 Event Type Mapping (27 types)
 
-Events are automatically classified from HTTP method + path + response body. Path matching uses strict regex patterns to avoid false positives (e.g. `/orders` matches but `/reorder` does not). Cart endpoints (`/carts`) are also tracked:
+Events are automatically classified from HTTP method + path + response body. Path matching uses strict regex patterns to avoid false positives (e.g. `/orders` matches but `/reorder` does not). For MCP/A2A transports, `classify_jsonrpc()` maps tool names to the same event types.
+
+#### Checkout (6)
 
 | HTTP Operation | Event Type | Trigger |
 |---|---|---|
-| `GET /.well-known/ucp` | `profile_discovered` | Agent fetches merchant discovery profile |
 | `POST /checkout-sessions` | `checkout_session_created` | New checkout session initiated |
 | `GET /checkout-sessions/{id}` | `checkout_session_get` | Session retrieved for display/validation |
 | `PUT /checkout-sessions/{id}` | `checkout_session_updated` | Buyer info, fulfillment, or discount added |
 | `PUT /checkout-sessions/{id}` | `checkout_escalation` | Response status = `requires_escalation` |
 | `POST /checkout-sessions/{id}/complete` | `checkout_session_completed` | Checkout finalized with payment |
 | `POST /checkout-sessions/{id}/cancel` | `checkout_session_canceled` | Session explicitly canceled |
+
+#### Cart (4)
+
+| HTTP Operation | Event Type | Trigger |
+|---|---|---|
 | `POST /carts` | `cart_created` | New cart created |
 | `GET /carts/{id}` | `cart_get` | Cart retrieved |
 | `PUT /carts/{id}` | `cart_updated` | Cart updated (items added/removed) |
 | `POST /carts/{id}/cancel` | `cart_canceled` | Cart explicitly canceled |
+
+#### Order (6)
+
+| HTTP Operation | Event Type | Trigger |
+|---|---|---|
 | `POST /orders` | `order_created` | Order webhook from merchant |
-| `GET /orders/{id}` | `order_updated` | Order status retrieval |
-| `POST /testing/simulate-shipping/{id}` | `order_shipped` | Shipment simulation (testing) |
-| Any unmatched path, status >= 400 | `error` | HTTP error response (fallback) |
+| `GET /orders/{id}` *(status=confirmed)* | `order_updated` | Order status retrieval |
+| `GET /orders/{id}` *(status=shipped)* | `order_shipped` | Shipment tracking available |
+| `GET /orders/{id}` *(status=delivered)* | `order_delivered` | Delivery confirmed |
+| `GET /orders/{id}` *(status=returned)* | `order_returned` | Return processed |
+| `GET /orders/{id}` *(status=canceled)* | `order_canceled` | Order canceled |
+
+#### Identity (3)
+
+| HTTP Operation | Event Type | Trigger |
+|---|---|---|
+| `POST /identity` | `identity_link_initiated` | OAuth identity linking started |
+| `GET /identity/callback` | `identity_link_completed` | Identity callback confirmed |
+| `POST /identity/revoke` | `identity_link_revoked` | Identity link revoked |
+
+#### Payment (4)
+
+| Event Type | Trigger |
+|---|---|
+| `payment_handler_negotiated` | Platform + merchant handler intersection computed |
+| `payment_instrument_selected` | Buyer selects payment instrument |
+| `payment_completed` | Payment succeeds |
+| `payment_failed` | Payment fails |
+
+#### Discovery (2)
+
+| HTTP Operation | Event Type | Trigger |
+|---|---|---|
+| `GET /.well-known/ucp` | `profile_discovered` | Agent fetches merchant discovery profile |
+| Capability exchange | `capability_negotiated` | UCP capability negotiation completed |
+
+#### Fallback (2)
+
+| Condition | Event Type | Trigger |
+|---|---|---|
+| Any unmatched path, status >= 400 | `error` | HTTP error response |
+| Any unmatched path, status < 400 | `request` | Unclassified successful request |
 
 **Note:** Path-specific matches take priority over status code. A `POST /checkout-sessions` returning 500 is classified as `checkout_session_created` (not `error`), since the path match is more informative for analytics.
 
-### 4.2 UCP Checkout State Machine Alignment
+### 4.2 JSON-RPC Classification (MCP/A2A)
+
+For MCP and A2A transports, `classify_jsonrpc()` maps tool names to event types using pattern matching. Examples:
+
+| Tool Name Pattern | Event Type |
+|---|---|
+| `discover_merchant`, `a2a.ucp.discover` | `profile_discovered` |
+| `create_checkout`, `a2a.ucp.checkout.create` | `checkout_session_created` |
+| `complete_checkout`, `a2a.ucp.checkout.complete` | `checkout_session_completed` |
+| `create_cart`, `a2a.ucp.cart.create` | `cart_created` |
+| `get_order`, `a2a.ucp.order.get` | `order_updated` (refined by response body status) |
+| `link_identity`, `a2a.ucp.identity.link` | `identity_link_initiated` |
+| `negotiate_capability`, `a2a.ucp.capability.negotiate` | `capability_negotiated` |
+
+The response body is still parsed for field extraction (totals, status, payment, etc.) regardless of transport.
+
+### 4.3 UCP Checkout State Machine Alignment
 
 ```
 incomplete --> requires_escalation --> ready_for_complete
@@ -307,16 +373,26 @@ All three integration points share the same `UCPAnalyticsTracker` and `AsyncBigQ
 
 ---
 
-## 10. End-to-End Demo
+## 10. Examples
 
-`examples/e2e_demo.py` (~860 lines) runs without GCP credentials:
+Eight runnable examples are included (see [`examples/README.md`](../examples/README.md) for full details):
 
-1. Starts a mini UCP merchant server (FastAPI, port 8199) with flower shop catalog
-2. Runs a shopping agent through full happy path: discovery → create checkout (2 bouquets + 1 sunflower) → add buyer + shipping → apply discount → complete with Visa → simulate shipment
-3. Writes 6 events to local SQLite (same schema as BigQuery)
-4. Prints analytics report: session timeline, funnel, financial summary, payment, capabilities, latency
+| Example | BigQuery? | Transport | Coverage |
+|---|---|---|---|
+| `e2e_demo.py` | No (SQLite) | REST | Checkout happy path (5 types) |
+| `scenarios_demo.py` | Yes | REST | Errors, cancellation, escalation (7 types) |
+| `cart_demo.py` | Yes | REST | Cart CRUD + checkout conversion (6 types) |
+| `order_lifecycle_demo.py` | Yes | REST | Order delivered/returned/canceled (8 types) |
+| `transport_demo.py` | Yes | REST/MCP/A2A | All 3 transports compared (5 types) |
+| `identity_payment_demo.py` | Yes | REST | Identity linking + payment flows (10 types) |
+| `bq_demo.py` | Yes | REST/MCP/A2A | All 27 event types, 3 transports, BQ verification |
+| `bq_adk_demo.py` | Yes | ADK/MCP/A2A | All 27 event types via ADK plugin, BQ verification |
 
-**Demo output:** $79.97 subtotal + $7.00 tax + $5.99 fulfillment - $5.00 discount = **$87.96 total**. 6 events captured in ~35ms total.
+Shared BigQuery configuration (`PROJECT_ID`, `DATASET_ID`, `TABLE_ID`) lives in `examples/_demo_utils.py` and reads from the `GCP_PROJECT_ID` environment variable.
+
+**Local demo (no GCP):** `e2e_demo.py` starts a mini UCP merchant server (FastAPI, port 8199) with a flower shop catalog, runs a shopping agent through the full happy path (discovery → checkout → payment → shipment), writes 6 events to local SQLite, and prints an analytics report.
+
+**Comprehensive demos:** `bq_demo.py` and `bq_adk_demo.py` each exercise all 27 event types across REST, MCP, and A2A transports, then query BigQuery to verify all events landed correctly.
 
 ---
 
@@ -363,32 +439,8 @@ The two plugins are complementary: BQ Agent Analytics provides general agent obs
 
 ## 13. Future Work
 
-- **MCP transport hook:** Intercept UCP operations over Model Context Protocol bindings
-- **A2A transport hook:** Capture agent-to-agent UCP commerce events
 - **Streaming analytics:** Real-time dashboards via BigQuery BI Engine or Pub/Sub
 - **Cost attribution:** Correlate LLM token costs (from ADK plugin) with revenue per checkout session
 - **Conformance testing integration:** Validate captured events against UCP conformance test expectations
 - **Multi-merchant aggregation:** Cross-merchant funnel analysis for platform operators
 - **Looker Studio template:** Pre-built dashboard deployable via Terraform
-
----
-
-## Appendix: Package Statistics
-
-| Component | Lines | Complexity |
-|---|---|---|
-| `events.py` | 153 | Data classes + enums |
-| `parser.py` | 212 | Regex matching + JSON traversal |
-| `writer.py` | 229 | Async batch writer + DDL |
-| `tracker.py` | 177 | Orchestrator + PII redaction |
-| `middleware.py` | 128 | ASGI middleware (fire-and-forget) |
-| `client_hooks.py` | 124 | HTTPX event hook |
-| `adk_plugin.py` | 151 | Optional ADK adapter |
-| `test_parser.py` | 175 | Parser unit tests |
-| `test_events.py` | 55 | Event + enum tests |
-| `test_tracker.py` | 176 | Tracker + PII redaction tests |
-| `test_writer.py` | 108 | Writer buffer + flush tests |
-| `test_client_hooks.py` | 102 | HTTPX hook tests |
-| `e2e_demo.py` | 860 | Self-contained demo |
-| `queries.sql` | 167 | 10 dashboard queries |
-| **Total** | **~2,820** | |
