@@ -149,7 +149,7 @@ async def shutdown():
 2. Reads the request body (for POST/PUT/PATCH)
 3. Lets the handler execute normally and measures latency
 4. Reads the response body
-5. Passes both to `UCPAnalyticsTracker.record_http()` as a fire-and-forget task
+5. Passes both to `UCPAnalyticsTracker.record_http()` as a fire-and-forget task, registered on the tracker so `tracker.close()` drains in-flight tasks before flushing
    - For webhook paths, the tracker uses the **request body** (order payload) for classification and field extraction, since the response is just an ack
 6. Non-UCP paths pass through with zero overhead
 
