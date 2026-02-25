@@ -94,12 +94,30 @@ class UCPResponseParser:
             return UCPEventType.ORDER_UPDATED
 
         # Webhook paths for order lifecycle
-        if re.search(r"/webhooks?/order[_-]delivered", p):
-            return UCPEventType.ORDER_DELIVERED
-        if re.search(r"/webhooks?/order[_-]returned", p):
-            return UCPEventType.ORDER_RETURNED
-        if re.search(r"/webhooks?/order[_-]canceled", p):
-            return UCPEventType.ORDER_CANCELED
+        # Upstream: POST /webhooks/partners/{partner_id}/events/order
+        if re.search(r"/webhooks?/", p):
+            # Check for upstream partner webhook format
+            if re.search(r"/webhooks?/partners/[^/]+/events/order", p):
+                if response_body and isinstance(response_body, dict):
+                    order_status = response_body.get("status", "")
+                    if order_status == "shipped":
+                        return UCPEventType.ORDER_SHIPPED
+                    if order_status == "delivered":
+                        return UCPEventType.ORDER_DELIVERED
+                    if order_status == "returned":
+                        return UCPEventType.ORDER_RETURNED
+                    if order_status in ("canceled", "cancelled"):
+                        return UCPEventType.ORDER_CANCELED
+                return UCPEventType.ORDER_UPDATED
+            # Legacy: /webhooks/order-delivered etc.
+            if re.search(r"/webhooks?/order[_-]delivered", p):
+                return UCPEventType.ORDER_DELIVERED
+            if re.search(r"/webhooks?/order[_-]returned", p):
+                return UCPEventType.ORDER_RETURNED
+            if re.search(r"/webhooks?/order[_-]canceled", p):
+                return UCPEventType.ORDER_CANCELED
+            # Generic webhook → treat as order update
+            return UCPEventType.ORDER_UPDATED
 
         # Identity linking (strict: /identity or /oauth paths)
         if re.search(r"/(?:identity|oauth)(?:/|$)", p):
@@ -142,6 +160,11 @@ class UCPResponseParser:
         "discover": ("GET", "/.well-known/ucp"),
         "discover_merchant": ("GET", "/.well-known/ucp"),
         "simulate_shipping": ("POST", "/testing/simulate-shipping/{id}"),
+        "order_event_webhook": ("POST", "/webhooks/partners/{id}/events/order"),
+        "add_to_checkout": ("PUT", "/checkout-sessions/{id}"),
+        "remove_from_checkout": ("PUT", "/checkout-sessions/{id}"),
+        "update_customer_details": ("PUT", "/checkout-sessions/{id}"),
+        "start_payment": ("POST", "/checkout-sessions/{id}/complete"),
         "link_identity": ("POST", "/identity"),
         "revoke_identity": ("DELETE", "/identity/revoke"),
         "negotiate_capability": ("POST", "/capabilities/negotiate"),
@@ -186,7 +209,7 @@ class UCPResponseParser:
             return cls.classify(method, path, status_code, response_body)
 
         # Handle A2A DataPart keys like "add_to_checkout" → update
-        if "add_to" in tool_name or "update" in tool_name:
+        if "add_to" in tool_name or "remove_from" in tool_name or "update" in tool_name:
             if "checkout" in tool_name:
                 return cls.classify(
                     "PUT", "/checkout-sessions/{id}", status_code, response_body
@@ -242,7 +265,15 @@ class UCPResponseParser:
 
         # --- status ---
         if "status" in body:
-            result["checkout_status"] = body["status"]
+            # Only write checkout_status for checkout responses, not orders/carts
+            if "checkout_id" not in body:
+                status_val = body["status"]
+                _CHECKOUT_STATUSES = {
+                    "incomplete", "requires_escalation", "ready_for_complete",
+                    "complete_in_progress", "completed", "canceled",
+                }
+                if status_val in _CHECKOUT_STATUSES:
+                    result["checkout_status"] = status_val
 
         # --- currency ---
         if "currency" in body:

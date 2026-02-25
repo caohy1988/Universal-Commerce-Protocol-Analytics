@@ -55,6 +55,7 @@ class UCPAnalyticsMiddleware(BaseHTTPMiddleware):
         "/orders",
         "/identity",
         "/testing/simulate",
+        "/webhooks",
     )
 
     def __init__(self, app: Any, tracker: Any) -> None:

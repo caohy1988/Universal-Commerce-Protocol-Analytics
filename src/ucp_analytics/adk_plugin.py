@@ -63,6 +63,7 @@ class UCPAgentAnalyticsPlugin(BasePlugin):  # type: ignore[misc]
         "payment",
         "ucp_",
         "negotiate",
+        "customer_details",
     ]
 
     # Map ADK tool names → (HTTP method, path) for accurate event classification.
@@ -82,6 +83,10 @@ class UCPAgentAnalyticsPlugin(BasePlugin):  # type: ignore[misc]
         "create_order": ("POST", "/orders"),
         "get_order": ("GET", "/orders/{id}"),
         "simulate_shipping": ("POST", "/testing/simulate-shipping/{id}"),
+        "add_to_checkout": ("PUT", "/checkout-sessions/{id}"),
+        "remove_from_checkout": ("PUT", "/checkout-sessions/{id}"),
+        "update_customer_details": ("PUT", "/checkout-sessions/{id}"),
+        "start_payment": ("POST", "/checkout-sessions/{id}/complete"),
     }
 
     def __init__(
