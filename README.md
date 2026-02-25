@@ -72,9 +72,13 @@ uv sync
 Add two lines to your UCP `server.py`:
 
 ```python
+import os
 from ucp_analytics import UCPAnalyticsTracker, UCPAnalyticsMiddleware
 
-tracker = UCPAnalyticsTracker(project_id="my-project", app_name="flower_shop")
+tracker = UCPAnalyticsTracker(
+    project_id=os.environ.get("GCP_PROJECT_ID", "your-gcp-project-id"),
+    app_name="flower_shop",
+)
 app.add_middleware(UCPAnalyticsMiddleware, tracker=tracker)
 
 @app.on_event("shutdown")
@@ -88,10 +92,14 @@ async def shutdown():
 ### Agent / platform client (HTTPX)
 
 ```python
+import os
 import httpx
 from ucp_analytics import UCPAnalyticsTracker, UCPClientEventHook
 
-tracker = UCPAnalyticsTracker(project_id="my-project", app_name="shopping_agent")
+tracker = UCPAnalyticsTracker(
+    project_id=os.environ.get("GCP_PROJECT_ID", "your-gcp-project-id"),
+    app_name="shopping_agent",
+)
 hook = UCPClientEventHook(tracker)
 
 client = httpx.AsyncClient(event_hooks={"response": [hook]})
@@ -102,25 +110,70 @@ Every call to `/checkout-sessions`, `/.well-known/ucp`, `/orders`, `/carts`,
 
 ## Events Tracked
 
-Events are auto-classified from HTTP method + path + response status:
+All 27 UCP event types are auto-classified from HTTP method + path + response body:
+
+### Checkout (6)
 
 | HTTP Operation | Event Type |
 |---|---|
-| `GET /.well-known/ucp` | `profile_discovered` |
 | `POST /checkout-sessions` | `checkout_session_created` |
+| `GET /checkout-sessions/{id}` | `checkout_session_get` |
 | `PUT /checkout-sessions/{id}` | `checkout_session_updated` |
 | `PUT /checkout-sessions/{id}` *(status=requires_escalation)* | `checkout_escalation` |
 | `POST /checkout-sessions/{id}/complete` | `checkout_session_completed` |
 | `POST /checkout-sessions/{id}/cancel` | `checkout_session_canceled` |
-| `GET /checkout-sessions/{id}` | `checkout_session_get` |
+
+### Cart (4)
+
+| HTTP Operation | Event Type |
+|---|---|
 | `POST /carts` | `cart_created` |
 | `GET /carts/{id}` | `cart_get` |
 | `PUT /carts/{id}` | `cart_updated` |
 | `POST /carts/{id}/cancel` | `cart_canceled` |
+
+### Order (6)
+
+| HTTP Operation | Event Type |
+|---|---|
 | `POST /orders` | `order_created` |
-| `GET /orders/{id}` | `order_updated` |
+| `GET /orders/{id}` *(status=confirmed)* | `order_updated` |
+| `GET /orders/{id}` *(status=shipped)* | `order_shipped` |
+| `GET /orders/{id}` *(status=delivered)* | `order_delivered` |
+| `GET /orders/{id}` *(status=returned)* | `order_returned` |
+| `GET /orders/{id}` *(status=canceled)* | `order_canceled` |
 | `POST /webhooks/partners/{id}/events/order` | *(by request body status)* |
+
+### Identity (3)
+
+| HTTP Operation | Event Type |
+|---|---|
+| `POST /identity` | `identity_link_initiated` |
+| `GET /identity/callback` | `identity_link_completed` |
+| `POST /identity/revoke` | `identity_link_revoked` |
+
+### Payment (4)
+
+| Event Type | Description |
+|---|---|
+| `payment_handler_negotiated` | Platform + merchant handler intersection computed |
+| `payment_instrument_selected` | Buyer selects payment instrument |
+| `payment_completed` | Payment succeeds |
+| `payment_failed` | Payment fails |
+
+### Discovery (2)
+
+| HTTP Operation | Event Type |
+|---|---|
+| `GET /.well-known/ucp` | `profile_discovered` |
+| Capability exchange | `capability_negotiated` |
+
+### Fallback (2)
+
+| Condition | Event Type |
+|---|---|
 | Any unmatched path, status >= 400 | `error` |
+| Any unmatched path, status < 400 | `request` |
 
 Webhook paths use the **request body** (order payload) for classification since
 the response is typically an ack. Webhook 4xx/5xx responses classify as `error`.
@@ -128,8 +181,10 @@ the response is typically an ack. Webhook 4xx/5xx responses classify as `error`.
 ## Configuration
 
 ```python
+import os
+
 UCPAnalyticsTracker(
-    project_id="my-project",        # required — GCP project
+    project_id=os.environ.get("GCP_PROJECT_ID"),  # required — GCP project
     dataset_id="ucp_analytics",     # BigQuery dataset
     table_id="ucp_events",          # BigQuery table
     app_name="flower_shop",         # tags every event
@@ -148,6 +203,24 @@ The underlying `AsyncBigQueryWriter` also accepts `max_buffer_size`
 fields include `items_discount_amount`, `fee_amount`, `discount_codes_json`,
 `discount_applied_json` (discount extension), `expires_at`, `continue_url`
 (checkout metadata), and `permalink_url` (order permalink).
+
+## Examples
+
+Eight runnable examples are included — see [`examples/README.md`](examples/README.md) for full details.
+
+| Example | BigQuery? | Transport | Coverage |
+|---|---|---|---|
+| [`e2e_demo.py`](examples/e2e_demo.py) | No (SQLite) | REST | Checkout happy path (5 types) |
+| [`scenarios_demo.py`](examples/scenarios_demo.py) | Yes | REST | Errors, cancellation, escalation (7 types) |
+| [`cart_demo.py`](examples/cart_demo.py) | Yes | REST | Cart CRUD + checkout conversion (6 types) |
+| [`order_lifecycle_demo.py`](examples/order_lifecycle_demo.py) | Yes | REST | Order delivered/returned/canceled (8 types) |
+| [`transport_demo.py`](examples/transport_demo.py) | Yes | REST/MCP/A2A | All 3 transports compared (5 types) |
+| [`identity_payment_demo.py`](examples/identity_payment_demo.py) | Yes | REST | Identity linking + payment flows (10 types) |
+| [`bq_demo.py`](examples/bq_demo.py) | Yes | REST/MCP/A2A | All 27 event types, 3 transports, BQ verification |
+| [`bq_adk_demo.py`](examples/bq_adk_demo.py) | Yes | ADK/MCP/A2A | All 27 event types via ADK plugin, BQ verification |
+
+Shared configuration lives in [`examples/_demo_utils.py`](examples/_demo_utils.py).
+Set `GCP_PROJECT_ID` in your environment or edit the file directly.
 
 ## Dashboard Queries
 
@@ -176,18 +249,23 @@ Universal-Commerce-Protocol-Analytics/
 │   ├── test_writer.py              # buffer, flush, retry, DDL tests
 │   └── test_client_hooks.py        # HTTPX hook tests
 ├── examples/
-│   ├── _demo_utils.py              # shared BQ config + helpers
-│   ├── e2e_demo.py                 # Self-contained E2E demo (no GCP)
-│   ├── bq_demo.py                  # All 27 event types, 3 transports
-│   ├── bq_adk_demo.py             # ADK plugin demo, all 27 types
-│   └── ...                         # scenarios, cart, order, identity demos
+│   ├── _demo_utils.py              # shared BQ config (PROJECT_ID, helpers)
+│   ├── e2e_demo.py                 # self-contained demo (no GCP)
+│   ├── scenarios_demo.py           # error paths + edge cases
+│   ├── cart_demo.py                # cart lifecycle
+│   ├── order_lifecycle_demo.py     # order lifecycle
+│   ├── transport_demo.py           # REST vs MCP vs A2A
+│   ├── identity_payment_demo.py    # identity + payment flows
+│   ├── bq_demo.py                  # comprehensive BQ demo (all 27 types)
+│   ├── bq_adk_demo.py             # comprehensive ADK demo (all 27 types)
+│   └── README.md                   # example guide with run instructions
+├── dashboards/queries.sql          # 10 BigQuery analytics queries
 ├── docs/
-│   ├── design_doc.md               # Design document
-│   └── bigquery-ucp-analytics.md   # BigQuery integration guide
+│   ├── design_doc.md               # design document
+│   └── bigquery-ucp-analytics.md   # BigQuery schema + usage guide
 ├── pyproject.toml                  # hatchling + uv + ruff
-└── LICENSE                         # Apache 2.0
+└── uv.lock                        # pinned dependencies
 ```
-
 
 ## Contributing
 

@@ -21,7 +21,7 @@ from ucp_analytics import UCPAnalyticsTracker
 # Set GCP_PROJECT_ID env var, or edit the fallback below.
 # ======================================================================
 
-PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "test-project-0728-467323")
+PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "your-gcp-project-id")
 DATASET_ID = "ucp_analytics"
 TABLE_ID = "ucp_events"
 
