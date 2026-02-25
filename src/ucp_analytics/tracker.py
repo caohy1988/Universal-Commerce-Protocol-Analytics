@@ -6,6 +6,7 @@ middleware or HTTPX event hook.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any, Dict, List, Optional
@@ -83,6 +84,7 @@ class UCPAnalyticsTracker:
             batch_size=batch_size,
             auto_create_table=auto_create_table,
         )
+        self._pending_tasks: set[asyncio.Task] = set()
 
     # ------------------------------------------------------------------ #
     # Primary API
@@ -213,8 +215,31 @@ class UCPAnalyticsTracker:
         """Force flush buffered events to BigQuery."""
         await self._writer.flush()
 
+    def register_pending_task(self, task: asyncio.Task) -> None:
+        """Track a fire-and-forget task (used by middleware).
+
+        Tasks are automatically removed when done.  Call
+        :meth:`drain_pending` (or :meth:`close`, which calls it) to
+        await all in-flight tasks before shutdown.
+        """
+        self._pending_tasks.add(task)
+        task.add_done_callback(self._pending_tasks.discard)
+
+    async def drain_pending(self) -> None:
+        """Await all in-flight recording tasks.
+
+        The FastAPI middleware fires analytics recording as background
+        tasks so it doesn't block the HTTP response.  Call this before
+        :meth:`close` — or just call :meth:`close`, which drains
+        automatically.
+        """
+        if self._pending_tasks:
+            await asyncio.gather(*self._pending_tasks, return_exceptions=True)
+            self._pending_tasks.clear()
+
     async def close(self):
-        """Flush and release resources."""
+        """Drain pending tasks, flush, and release resources."""
+        await self.drain_pending()
         await self._writer.close()
         logger.info("UCPAnalyticsTracker closed")
 

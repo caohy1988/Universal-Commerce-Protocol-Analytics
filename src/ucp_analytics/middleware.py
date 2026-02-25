@@ -11,12 +11,11 @@ Usage::
 
     app = FastAPI()
     tracker = UCPAnalyticsTracker(project_id="my-proj", app_name="flower_shop")
-    middleware = UCPAnalyticsMiddleware(app, tracker=tracker)
+    app.add_middleware(UCPAnalyticsMiddleware, tracker=tracker)
 
     @app.on_event("shutdown")
     async def shutdown():
-        await middleware.drain_pending()
-        await tracker.close()
+        await tracker.close()  # drains in-flight tasks, then flushes
 """
 
 from __future__ import annotations
@@ -63,7 +62,6 @@ class UCPAnalyticsMiddleware(BaseHTTPMiddleware):
     def __init__(self, app: Any, tracker: Any) -> None:
         super().__init__(app)
         self.tracker = tracker
-        self._pending_tasks: set[asyncio.Task] = set()
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         path = request.url.path
@@ -103,7 +101,7 @@ class UCPAnalyticsMiddleware(BaseHTTPMiddleware):
             pass
 
         # Record the event (fire-and-forget; don't block the response).
-        # Tasks are tracked so drain_pending() can await them before shutdown.
+        # Tasks are tracked on the tracker so tracker.close() drains them.
         try:
             headers = dict(request.headers)
             task = asyncio.create_task(
@@ -118,8 +116,7 @@ class UCPAnalyticsMiddleware(BaseHTTPMiddleware):
                     request_headers=headers,
                 )
             )
-            self._pending_tasks.add(task)
-            task.add_done_callback(self._pending_tasks.discard)
+            self.tracker.register_pending_task(task)
         except Exception:
             logger.exception("UCP analytics recording failed")
 
@@ -138,12 +135,10 @@ class UCPAnalyticsMiddleware(BaseHTTPMiddleware):
     async def drain_pending(self) -> None:
         """Await all in-flight recording tasks.
 
-        Call this before ``tracker.close()`` during shutdown to ensure
-        no events are lost::
-
-            await middleware.drain_pending()
-            await tracker.close()
+        .. deprecated::
+            Pending tasks are now tracked on the tracker itself.
+            ``tracker.close()`` drains automatically.  This method
+            delegates to ``self.tracker.drain_pending()`` for
+            backwards compatibility.
         """
-        if self._pending_tasks:
-            await asyncio.gather(*self._pending_tasks, return_exceptions=True)
-            self._pending_tasks.clear()
+        await self.tracker.drain_pending()

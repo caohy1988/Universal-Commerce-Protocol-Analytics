@@ -135,12 +135,11 @@ tracker = UCPAnalyticsTracker(
     project_id="my-gcp-project",
     app_name="flower_shop",
 )
-middleware = UCPAnalyticsMiddleware(app, tracker=tracker)
+app.add_middleware(UCPAnalyticsMiddleware, tracker=tracker)
 
 @app.on_event("shutdown")
 async def shutdown():
-    await middleware.drain_pending()   # wait for in-flight analytics tasks
-    await tracker.close()
+    await tracker.close()  # drains in-flight tasks, then flushes
 ```
 
 **How it works:**

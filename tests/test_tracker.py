@@ -1,5 +1,6 @@
 """Tests for UCPAnalyticsTracker."""
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, patch
 
@@ -213,3 +214,18 @@ class TestFlushAndClose:
     async def test_close_delegates(self, tracker, mock_writer):
         await tracker.close()
         mock_writer.close.assert_awaited_once()
+
+    async def test_close_drains_pending_tasks(self, tracker, mock_writer):
+        """close() should await in-flight tasks before flushing."""
+        completed = []
+
+        async def slow_work():
+            await asyncio.sleep(0.01)
+            completed.append(True)
+
+        task = asyncio.create_task(slow_work())
+        tracker.register_pending_task(task)
+
+        await tracker.close()
+        assert completed == [True]
+        assert len(tracker._pending_tasks) == 0
