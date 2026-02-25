@@ -97,8 +97,8 @@ hook = UCPClientEventHook(tracker)
 client = httpx.AsyncClient(event_hooks={"response": [hook]})
 ```
 
-Every call to `/checkout-sessions`, `/.well-known/ucp`, `/orders`, `/carts`, etc.
-is automatically classified and written to BigQuery.
+Every call to `/checkout-sessions`, `/.well-known/ucp`, `/orders`, `/carts`,
+`/webhooks`, etc. is automatically classified and written to BigQuery.
 
 ## Events Tracked
 
@@ -119,7 +119,11 @@ Events are auto-classified from HTTP method + path + response status:
 | `POST /carts/{id}/cancel` | `cart_canceled` |
 | `POST /orders` | `order_created` |
 | `GET /orders/{id}` | `order_updated` |
+| `POST /webhooks/partners/{id}/events/order` | *(by request body status)* |
 | Any unmatched path, status >= 400 | `error` |
+
+Webhook paths use the **request body** (order payload) for classification since
+the response is typically an ack. Webhook 4xx/5xx responses classify as `error`.
 
 ## Configuration
 
