@@ -77,8 +77,11 @@ from ucp_analytics import UCPAnalyticsTracker, UCPAnalyticsMiddleware
 tracker = UCPAnalyticsTracker(project_id="my-project", app_name="flower_shop")
 app.add_middleware(UCPAnalyticsMiddleware, tracker=tracker)
 
+middleware = UCPAnalyticsMiddleware(app, tracker=tracker)
+
 @app.on_event("shutdown")
 async def shutdown():
+    await middleware.drain_pending()   # wait for in-flight analytics tasks
     await tracker.close()
 ```
 

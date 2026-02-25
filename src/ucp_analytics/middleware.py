@@ -11,10 +11,11 @@ Usage::
 
     app = FastAPI()
     tracker = UCPAnalyticsTracker(project_id="my-proj", app_name="flower_shop")
-    app.add_middleware(UCPAnalyticsMiddleware, tracker=tracker)
+    middleware = UCPAnalyticsMiddleware(app, tracker=tracker)
 
     @app.on_event("shutdown")
     async def shutdown():
+        await middleware.drain_pending()
         await tracker.close()
 """
 
