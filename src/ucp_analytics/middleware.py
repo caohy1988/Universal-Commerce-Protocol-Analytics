@@ -56,11 +56,13 @@ class UCPAnalyticsMiddleware(BaseHTTPMiddleware):
         "/identity",
         "/testing/simulate",
         "/webhooks",
+        "/webhook",
     )
 
     def __init__(self, app: Any, tracker: Any) -> None:
         super().__init__(app)
         self.tracker = tracker
+        self._pending_tasks: set[asyncio.Task] = set()
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         path = request.url.path
@@ -99,10 +101,11 @@ class UCPAnalyticsMiddleware(BaseHTTPMiddleware):
         except Exception:
             pass
 
-        # Record the event (fire-and-forget; don't block the response)
+        # Record the event (fire-and-forget; don't block the response).
+        # Tasks are tracked so drain_pending() can await them before shutdown.
         try:
             headers = dict(request.headers)
-            asyncio.create_task(
+            task = asyncio.create_task(
                 self.tracker.record_http(
                     method=request.method,
                     url=str(request.url),
@@ -114,6 +117,8 @@ class UCPAnalyticsMiddleware(BaseHTTPMiddleware):
                     request_headers=headers,
                 )
             )
+            self._pending_tasks.add(task)
+            task.add_done_callback(self._pending_tasks.discard)
         except Exception:
             logger.exception("UCP analytics recording failed")
 
@@ -128,3 +133,16 @@ class UCPAnalyticsMiddleware(BaseHTTPMiddleware):
         # Preserve all original headers including multi-value ones (e.g. set-cookie)
         new_response.raw_headers = response.raw_headers
         return new_response
+
+    async def drain_pending(self) -> None:
+        """Await all in-flight recording tasks.
+
+        Call this before ``tracker.close()`` during shutdown to ensure
+        no events are lost::
+
+            await middleware.drain_pending()
+            await tracker.close()
+        """
+        if self._pending_tasks:
+            await asyncio.gather(*self._pending_tasks, return_exceptions=True)
+            self._pending_tasks.clear()

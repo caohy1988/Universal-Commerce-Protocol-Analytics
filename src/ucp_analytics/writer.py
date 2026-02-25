@@ -222,6 +222,12 @@ class AsyncBigQueryWriter:
             )
             if errors:
                 logger.error("BQ insert errors (%d rows): %s", len(batch), errors[:3])
+                # Re-queue failed batch so rows are not lost
+                async with self._lock:
+                    requeued = batch + self._buffer
+                    if len(requeued) > self.max_buffer_size:
+                        requeued = requeued[: self.max_buffer_size]
+                    self._buffer = requeued
             else:
                 logger.debug("Flushed %d UCP events", len(batch))
         except Exception:

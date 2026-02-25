@@ -137,7 +137,7 @@ class UCPAnalyticsTracker:
         # Extract UCP fields from response (preferred) or request.
         # For webhooks, the order payload is in the request body and
         # the response is just an ack like {"status": "ok"}.
-        is_webhook = "/webhooks" in path
+        is_webhook = "/webhook" in path
         if is_webhook and request_body:
             body_to_parse = request_body
         else:

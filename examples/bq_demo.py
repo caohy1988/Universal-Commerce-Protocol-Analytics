@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import uuid
 from contextlib import asynccontextmanager
 from typing import Dict
@@ -37,10 +38,10 @@ from ucp_analytics import (
 )
 
 # ==========================================================================
-# Config
+# Config — set GCP_PROJECT_ID env var, or edit the fallback below.
 # ==========================================================================
 
-PROJECT_ID = "test-project-0728-467323"
+PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "test-project-0728-467323")
 DATASET_ID = "ucp_analytics"
 TABLE_ID = "ucp_events"
 APP_NAME = "bq_demo"

@@ -50,6 +50,7 @@ class UCPClientEventHook:
         "/identity",
         "/simulate-shipping",
         "/webhooks",
+        "/webhook",
     )
 
     def __init__(self, tracker: Any) -> None:

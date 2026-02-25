@@ -21,7 +21,7 @@ Three integration points — pick any or combine:
 |---|---|---|
 | **FastAPI middleware** | Merchant server | `app.add_middleware(UCPAnalyticsMiddleware, tracker=t)` |
 | **HTTPX event hook** | Agent / platform | `httpx.AsyncClient(event_hooks={"response": [hook]})` |
-| **ADK plugin** *(optional)* | Google ADK agent | `Runner(plugins=[UCPAdkPlugin(...)])` |
+| **ADK plugin** *(optional)* | Google ADK agent | `Runner(plugins=[UCPAgentAnalyticsPlugin(...)])` |
 
 ```
  Platform (Agent)                    Business (Merchant)
@@ -60,8 +60,8 @@ pip install ucp-analytics[adk]
 Or install from source:
 
 ```bash
-git clone https://github.com/Universal-Commerce-Protocol/analytics.git
-cd analytics
+git clone https://github.com/haiyuan-eng-google/Universal-Commerce-Protocol-Analytics.git
+cd Universal-Commerce-Protocol-Analytics
 uv sync
 ```
 
@@ -160,7 +160,6 @@ fulfillment geography, session timeline, and discovery-to-checkout rate.
 
 ```
 Universal-Commerce-Protocol-Analytics/
-├── .github/workflows/ci.yml       # ruff lint + pytest (py 3.10-3.12)
 ├── src/ucp_analytics/
 │   ├── __init__.py                 # public API exports (lazy-loads middleware)
 │   ├── events.py                   # UCPEvent, UCPEventType, CheckoutStatus
@@ -177,10 +176,14 @@ Universal-Commerce-Protocol-Analytics/
 │   ├── test_writer.py              # buffer, flush, retry, DDL tests
 │   └── test_client_hooks.py        # HTTPX hook tests
 ├── examples/
+│   ├── _demo_utils.py              # shared BQ config + helpers
 │   ├── e2e_demo.py                 # Self-contained E2E demo (no GCP)
-│   └── flower_shop_analytics.py    # Integration with UCP samples server
-├── dashboards/queries.sql          # 10 BigQuery analytics queries
-├── docs/design_doc.md              # Design document
+│   ├── bq_demo.py                  # All 27 event types, 3 transports
+│   ├── bq_adk_demo.py             # ADK plugin demo, all 27 types
+│   └── ...                         # scenarios, cart, order, identity demos
+├── docs/
+│   ├── design_doc.md               # Design document
+│   └── bigquery-ucp-analytics.md   # BigQuery integration guide
 ├── pyproject.toml                  # hatchling + uv + ruff
 └── LICENSE                         # Apache 2.0
 ```

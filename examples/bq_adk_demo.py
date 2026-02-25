@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import uuid
 from typing import Dict
 
@@ -31,7 +32,7 @@ from ucp_analytics.adk_plugin import UCPAgentAnalyticsPlugin
 # Config
 # ==========================================================================
 
-PROJECT_ID = "test-project-0728-467323"
+PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "test-project-0728-467323")
 DATASET_ID = "ucp_analytics"
 TABLE_ID = "ucp_events"
 APP_NAME = "bq_adk_demo"

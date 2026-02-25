@@ -75,6 +75,26 @@ class TestAsyncBigQueryWriter:
         ids = [r["event_id"] for r in writer._buffer]
         assert ids == ["2", "3", "4"]
 
+    async def test_flush_requeues_on_partial_insert_errors(self, writer):
+        """Row-level errors from insert_rows_json should requeue the batch."""
+        mock_client = MagicMock()
+        # Simulate row-level errors (non-empty list returned)
+        mock_client.insert_rows_json.return_value = [
+            {"index": 0, "errors": [{"reason": "invalid"}]}
+        ]
+        writer._client = mock_client
+
+        await writer.enqueue({"event_id": "1", "event_type": "test"})
+        await writer.enqueue({"event_id": "2", "event_type": "test"})
+
+        with patch("asyncio.to_thread", side_effect=lambda fn, *a: fn(*a)):
+            await writer.flush()
+
+        # Rows should be re-queued (not lost)
+        assert len(writer._buffer) == 2
+        ids = [r["event_id"] for r in writer._buffer]
+        assert ids == ["1", "2"]
+
     async def test_close_flushes(self, writer):
         mock_client = MagicMock()
         mock_client.insert_rows_json.return_value = []

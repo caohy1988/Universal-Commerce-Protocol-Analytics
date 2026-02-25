@@ -120,6 +120,25 @@ class TestRecordHttp:
         assert event.checkout_session_id == "chk_abc"
 
 
+    async def test_singular_webhook_uses_request_body(self, tracker, mock_writer):
+        """Legacy /webhook/ (singular) should also use request_body."""
+        order_payload = {
+            "id": "order_abc",
+            "checkout_id": "chk_xyz",
+            "status": "delivered",
+        }
+        event = await tracker.record_http(
+            method="POST",
+            url="https://merchant.example.com/webhook/order-delivered",
+            status_code=200,
+            request_body=order_payload,
+            response_body={"status": "ok"},
+        )
+
+        assert event.order_id == "order_abc"
+        assert event.checkout_session_id == "chk_xyz"
+
+
 class TestPIIRedaction:
     async def test_redacts_configured_fields(self, mock_writer):
         tracker = UCPAnalyticsTracker(
