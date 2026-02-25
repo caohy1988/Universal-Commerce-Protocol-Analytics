@@ -613,7 +613,7 @@ class TestClassifyJsonRPC:
     def test_start_payment(self):
         assert (
             UCPResponseParser.classify_jsonrpc("start_payment")
-            == UCPEventType.CHECKOUT_SESSION_COMPLETED
+            == UCPEventType.CHECKOUT_SESSION_UPDATED
         )
 
     def test_update_customer_details(self):
@@ -629,24 +629,29 @@ class TestClassifyJsonRPC:
 class TestWebhookClassification:
     """Tests for upstream partner webhook path classification."""
 
-    def test_partner_webhook_shipped(self):
+    def test_partner_webhook_shipped_via_request_body(self):
+        """Upstream: order payload is in request_body, response is ack."""
+        order = {"id": "order_1", "checkout_id": "chk_1", "status": "shipped"}
         assert (
             UCPResponseParser.classify(
                 "POST",
                 "/webhooks/partners/p1/events/order",
                 200,
-                {"status": "shipped"},
+                {"status": "ok"},
+                request_body=order,
             )
             == UCPEventType.ORDER_SHIPPED
         )
 
-    def test_partner_webhook_delivered(self):
+    def test_partner_webhook_delivered_via_request_body(self):
+        order = {"id": "order_1", "checkout_id": "chk_1", "status": "delivered"}
         assert (
             UCPResponseParser.classify(
                 "POST",
                 "/webhooks/partners/p1/events/order",
                 200,
-                {"status": "delivered"},
+                {"status": "ok"},
+                request_body=order,
             )
             == UCPEventType.ORDER_DELIVERED
         )
@@ -701,6 +706,24 @@ class TestWebhookClassification:
                 "POST", "/webhooks/some-other-event", 200, {}
             )
             == UCPEventType.ORDER_UPDATED
+        )
+
+    def test_webhook_error_500(self):
+        """Webhook 5xx should classify as error, not order_updated."""
+        assert (
+            UCPResponseParser.classify(
+                "POST", "/webhooks/partners/p1/events/order", 500, {}
+            )
+            == UCPEventType.ERROR
+        )
+
+    def test_webhook_error_400(self):
+        """Webhook 4xx should classify as error."""
+        assert (
+            UCPResponseParser.classify(
+                "POST", "/webhooks/some-event", 400, {}
+            )
+            == UCPEventType.ERROR
         )
 
 

@@ -31,6 +31,7 @@ class UCPResponseParser:
         path: str,
         status_code: int,
         response_body: Optional[dict],
+        request_body: Optional[dict] = None,
     ) -> UCPEventType:
         """Derive the UCP event type from the HTTP request + response."""
         m = method.upper()
@@ -96,10 +97,19 @@ class UCPResponseParser:
         # Webhook paths for order lifecycle
         # Upstream: POST /webhooks/partners/{partner_id}/events/order
         if re.search(r"/webhooks?/", p):
+            # Webhook errors should still classify as errors
+            if status_code and status_code >= 400:
+                return UCPEventType.ERROR
             # Check for upstream partner webhook format
+            # Payload is in the request body; response is just ack
             if re.search(r"/webhooks?/partners/[^/]+/events/order", p):
-                if response_body and isinstance(response_body, dict):
-                    order_status = response_body.get("status", "")
+                body = (
+                    request_body
+                    if request_body and isinstance(request_body, dict)
+                    else response_body
+                )
+                if body and isinstance(body, dict):
+                    order_status = body.get("status", "")
                     if order_status == "shipped":
                         return UCPEventType.ORDER_SHIPPED
                     if order_status == "delivered":
@@ -164,7 +174,7 @@ class UCPResponseParser:
         "add_to_checkout": ("PUT", "/checkout-sessions/{id}"),
         "remove_from_checkout": ("PUT", "/checkout-sessions/{id}"),
         "update_customer_details": ("PUT", "/checkout-sessions/{id}"),
-        "start_payment": ("POST", "/checkout-sessions/{id}/complete"),
+        "start_payment": ("PUT", "/checkout-sessions/{id}"),
         "link_identity": ("POST", "/identity"),
         "revoke_identity": ("DELETE", "/identity/revoke"),
         "negotiate_capability": ("POST", "/capabilities/negotiate"),

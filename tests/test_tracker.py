@@ -100,6 +100,26 @@ class TestRecordHttp:
         assert event.request_id == "req_456"
 
 
+    async def test_webhook_uses_request_body(self, tracker, mock_writer):
+        """Webhook: order payload in request_body, response is ack."""
+        order_payload = {
+            "id": "order_xyz",
+            "checkout_id": "chk_abc",
+            "status": "shipped",
+        }
+        event = await tracker.record_http(
+            method="POST",
+            url="https://merchant.example.com/webhooks/partners/p1/events/order",
+            status_code=200,
+            request_body=order_payload,
+            response_body={"status": "ok"},
+        )
+
+        assert event.event_type == "order_shipped"
+        assert event.order_id == "order_xyz"
+        assert event.checkout_session_id == "chk_abc"
+
+
 class TestPIIRedaction:
     async def test_redacts_configured_fields(self, mock_writer):
         tracker = UCPAnalyticsTracker(

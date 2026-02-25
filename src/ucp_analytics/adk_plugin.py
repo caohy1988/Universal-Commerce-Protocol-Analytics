@@ -86,7 +86,7 @@ class UCPAgentAnalyticsPlugin(BasePlugin):  # type: ignore[misc]
         "add_to_checkout": ("PUT", "/checkout-sessions/{id}"),
         "remove_from_checkout": ("PUT", "/checkout-sessions/{id}"),
         "update_customer_details": ("PUT", "/checkout-sessions/{id}"),
-        "start_payment": ("POST", "/checkout-sessions/{id}/complete"),
+        "start_payment": ("PUT", "/checkout-sessions/{id}"),
     }
 
     def __init__(

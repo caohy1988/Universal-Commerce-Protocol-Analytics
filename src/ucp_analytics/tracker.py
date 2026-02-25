@@ -113,9 +113,11 @@ class UCPAnalyticsTracker:
 
         merchant_host = (parsed_url.hostname or "") if parsed_url else ""
 
-        # Classify
+        # Classify (pass request_body for webhook flows where payload
+        # is in the request and response is just an ack)
         event_type = UCPResponseParser.classify(
-            method, path, status_code, response_body
+            method, path, status_code, response_body,
+            request_body=request_body,
         )
 
         # Build event
@@ -132,8 +134,14 @@ class UCPAnalyticsTracker:
             request_id=headers.get("request-id", ""),
         )
 
-        # Extract UCP fields from response (preferred) or request
-        body_to_parse = response_body or request_body
+        # Extract UCP fields from response (preferred) or request.
+        # For webhooks, the order payload is in the request body and
+        # the response is just an ack like {"status": "ok"}.
+        is_webhook = "/webhooks" in path
+        if is_webhook and request_body:
+            body_to_parse = request_body
+        else:
+            body_to_parse = response_body or request_body
         if body_to_parse and isinstance(body_to_parse, dict):
             if self.redact_pii:
                 body_to_parse = self._redact(body_to_parse)
