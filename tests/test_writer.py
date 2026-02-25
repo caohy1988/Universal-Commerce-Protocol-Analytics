@@ -75,6 +75,53 @@ class TestAsyncBigQueryWriter:
         ids = [r["event_id"] for r in writer._buffer]
         assert ids == ["2", "3", "4"]
 
+    async def test_flush_requeues_only_failed_rows(self, writer):
+        """Row-level errors from insert_rows_json should requeue only failed rows."""
+        mock_client = MagicMock()
+        # Simulate row-level error on index 0 only; index 1 succeeded
+        mock_client.insert_rows_json.return_value = [
+            {"index": 0, "errors": [{"reason": "invalid"}]}
+        ]
+        writer._client = mock_client
+
+        await writer.enqueue({"event_id": "1", "event_type": "test"})
+        await writer.enqueue({"event_id": "2", "event_type": "test"})
+
+        with patch("asyncio.to_thread", side_effect=lambda fn, *a: fn(*a)):
+            await writer.flush()
+
+        # Only the failed row (index 0) should be re-queued
+        assert len(writer._buffer) == 1
+        assert writer._buffer[0]["event_id"] == "1"
+
+    async def test_flush_requeues_multiple_failed_rows(self, writer):
+        """Multiple row-level errors requeue only those specific rows."""
+        mock_client = MagicMock()
+        mock_client.insert_rows_json.return_value = [
+            {"index": 0, "errors": [{"reason": "invalid"}]},
+            {"index": 2, "errors": [{"reason": "schema"}]},
+        ]
+        writer._client = mock_client
+
+        await writer.enqueue({"event_id": "1", "event_type": "test"})
+        await writer.enqueue({"event_id": "2", "event_type": "test"})
+        await writer.enqueue({"event_id": "3", "event_type": "test"})
+
+        with patch("asyncio.to_thread", side_effect=lambda fn, *a: fn(*a)):
+            # batch_size=3, but we already have 3 so flush manually
+            writer._buffer.clear()
+            writer._buffer.extend([
+                {"event_id": "1", "event_type": "test"},
+                {"event_id": "2", "event_type": "test"},
+                {"event_id": "3", "event_type": "test"},
+            ])
+            await writer.flush()
+
+        # Only rows at index 0 and 2 should be re-queued
+        assert len(writer._buffer) == 2
+        ids = [r["event_id"] for r in writer._buffer]
+        assert ids == ["1", "3"]
+
     async def test_close_flushes(self, writer):
         mock_client = MagicMock()
         mock_client.insert_rows_json.return_value = []

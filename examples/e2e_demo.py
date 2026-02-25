@@ -24,14 +24,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
+import re
 import sqlite3
 import time
 import uuid
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import httpx
 import uvicorn
@@ -97,8 +96,6 @@ def init_db() -> sqlite3.Connection:
 
 
 # --- Inline parser (same logic as ucp_analytics.parser) ---
-
-import re
 
 
 def classify_event(method: str, path: str, status_code: int, body: dict | None) -> str:
@@ -648,12 +645,11 @@ async def run_shopping_agent(tracker: LocalAnalyticsTracker):
         total = next(t["amount"] for t in updated["totals"] if t["type"] == "total")
         print(f"   Status: {updated['status']}")
         print(f"   Total (with shipping): ${total / 100:.2f}")
-        print(
-            f"   Fulfillment: {updated['fulfillment']['expectations'][0]['method_type']}"
-        )
-        print(
-            f"   Destination: {updated['fulfillment']['expectations'][0]['destination']['address_country']}"
-        )
+        ff_method = updated["fulfillment"]["expectations"][0]["method_type"]
+        dest = updated["fulfillment"]["expectations"][0]["destination"]
+        ff_country = dest["address_country"]
+        print(f"   Fulfillment: {ff_method}")
+        print(f"   Destination: {ff_country}")
         print(f"   ⏱  {latency}ms")
 
         # ------------------------------------------------------------------
@@ -720,9 +716,8 @@ async def run_shopping_agent(tracker: LocalAnalyticsTracker):
 
         print(f"   Status: {completed['status']}")
         print(f"   Order ID: {completed.get('order_id')}")
-        print(
-            f"   Payment: {completed['payment_data']['brand']} ****{completed['payment_data']['last_digits']}"
-        )
+        pd = completed["payment_data"]
+        print(f"   Payment: {pd['brand']} ****{pd['last_digits']}")
         print(f"   ⏱  {latency}ms")
 
         order_id = completed["order_id"]
@@ -818,7 +813,7 @@ def print_analytics_report(conn: sqlite3.Connection, session_id: str):
         print(f"   Tax:       ${(tax or 0) / 100:.2f}")
         print(f"   Fulfillment: ${(fulfillment or 0) / 100:.2f}")
         print(f"   Discount: -${(discount or 0) / 100:.2f}")
-        print(f"   ─────────────────")
+        print("   ─────────────────")
         print(f"   Total:     ${(total or 0) / 100:.2f}")
 
     # --- Payment details ---
@@ -864,9 +859,8 @@ def print_analytics_report(conn: sqlite3.Connection, session_id: str):
     print(f"   {'Event Type':<30} {'Calls':>5} {'Min':>8} {'Avg':>8} {'Max':>8}")
     print("   " + "─" * 63)
     for event_type, calls, min_ms, avg_ms, max_ms in cursor.fetchall():
-        print(
-            f"   {event_type:<30} {calls:>5} {min_ms:>7.1f} {avg_ms:>7.1f} {max_ms:>7.1f}"
-        )
+        stats = f"{min_ms:>7.1f} {avg_ms:>7.1f} {max_ms:>7.1f}"
+        print(f"   {event_type:<30} {calls:>5} {stats}")
 
     # --- Total events ---
     cursor = conn.execute("SELECT COUNT(*) FROM ucp_events")

@@ -6,6 +6,7 @@ middleware or HTTPX event hook.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any, Dict, List, Optional
@@ -83,6 +84,7 @@ class UCPAnalyticsTracker:
             batch_size=batch_size,
             auto_create_table=auto_create_table,
         )
+        self._pending_tasks: set[asyncio.Task] = set()
 
     # ------------------------------------------------------------------ #
     # Primary API
@@ -113,9 +115,11 @@ class UCPAnalyticsTracker:
 
         merchant_host = (parsed_url.hostname or "") if parsed_url else ""
 
-        # Classify
+        # Classify (pass request_body for webhook flows where payload
+        # is in the request and response is just an ack)
         event_type = UCPResponseParser.classify(
-            method, path, status_code, response_body
+            method, path, status_code, response_body,
+            request_body=request_body,
         )
 
         # Build event
@@ -132,8 +136,14 @@ class UCPAnalyticsTracker:
             request_id=headers.get("request-id", ""),
         )
 
-        # Extract UCP fields from response (preferred) or request
-        body_to_parse = response_body or request_body
+        # Extract UCP fields from response (preferred) or request.
+        # For webhooks, the order payload is in the request body and
+        # the response is just an ack like {"status": "ok"}.
+        is_webhook = "/webhook" in path
+        if is_webhook and request_body:
+            body_to_parse = request_body
+        else:
+            body_to_parse = response_body or request_body
         if body_to_parse and isinstance(body_to_parse, dict):
             if self.redact_pii:
                 body_to_parse = self._redact(body_to_parse)
@@ -205,8 +215,31 @@ class UCPAnalyticsTracker:
         """Force flush buffered events to BigQuery."""
         await self._writer.flush()
 
+    def register_pending_task(self, task: asyncio.Task) -> None:
+        """Track a fire-and-forget task (used by middleware).
+
+        Tasks are automatically removed when done.  Call
+        :meth:`drain_pending` (or :meth:`close`, which calls it) to
+        await all in-flight tasks before shutdown.
+        """
+        self._pending_tasks.add(task)
+        task.add_done_callback(self._pending_tasks.discard)
+
+    async def drain_pending(self) -> None:
+        """Await all in-flight recording tasks.
+
+        The FastAPI middleware fires analytics recording as background
+        tasks so it doesn't block the HTTP response.  Call this before
+        :meth:`close` — or just call :meth:`close`, which drains
+        automatically.
+        """
+        if self._pending_tasks:
+            await asyncio.gather(*self._pending_tasks, return_exceptions=True)
+            self._pending_tasks.clear()
+
     async def close(self):
-        """Flush and release resources."""
+        """Drain pending tasks, flush, and release resources."""
+        await self.drain_pending()
         await self._writer.close()
         logger.info("UCPAnalyticsTracker closed")
 

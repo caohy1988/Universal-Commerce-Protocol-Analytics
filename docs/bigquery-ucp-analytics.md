@@ -139,17 +139,18 @@ app.add_middleware(UCPAnalyticsMiddleware, tracker=tracker)
 
 @app.on_event("shutdown")
 async def shutdown():
-    await tracker.close()
+    await tracker.close()  # drains in-flight tasks, then flushes
 ```
 
 **How it works:**
 
 1. The middleware checks if the request path matches a UCP operation
-   (`/checkout-sessions`, `/carts`, `/.well-known/ucp`, `/orders`, `/identity`)
+   (`/checkout-sessions`, `/carts`, `/.well-known/ucp`, `/orders`, `/identity`, `/webhooks`)
 2. Reads the request body (for POST/PUT/PATCH)
 3. Lets the handler execute normally and measures latency
 4. Reads the response body
-5. Passes both to `UCPAnalyticsTracker.record_http()` as a fire-and-forget task
+5. Passes both to `UCPAnalyticsTracker.record_http()` as a fire-and-forget task, registered on the tracker so `tracker.close()` drains in-flight tasks before flushing
+   - For webhook paths, the tracker uses the **request body** (order payload) for classification and field extraction, since the response is just an ack
 6. Non-UCP paths pass through with zero overhead
 
 > **Requires:** `pip install ucp-analytics[fastapi]`
@@ -237,6 +238,10 @@ event classification:
 | `discover_merchant` | `GET /.well-known/ucp` | `profile_discovered` |
 | `create_checkout` | `POST /checkout-sessions` | `checkout_session_created` |
 | `update_checkout` | `PUT /checkout-sessions/{id}` | `checkout_session_updated` |
+| `add_to_checkout` | `PUT /checkout-sessions/{id}` | `checkout_session_updated` |
+| `remove_from_checkout` | `PUT /checkout-sessions/{id}` | `checkout_session_updated` |
+| `update_customer_details` | `PUT /checkout-sessions/{id}` | `checkout_session_updated` |
+| `start_payment` | `PUT /checkout-sessions/{id}` | `checkout_session_updated` |
 | `complete_checkout` | `POST /checkout-sessions/{id}/complete` | `checkout_session_completed` |
 | `cancel_checkout` | `POST /checkout-sessions/{id}/cancel` | `checkout_session_canceled` |
 | `create_cart` | `POST /carts` | `cart_created` |
@@ -244,6 +249,9 @@ event classification:
 | `cancel_cart` | `POST /carts/{id}/cancel` | `cart_canceled` |
 | `create_order` | `POST /orders` | `order_created` |
 | `get_weather` | *(not a UCP tool)* | *(skipped)* |
+
+> **Note:** `start_payment` maps to a checkout **update** (not completion) because it is a
+> pre-completion step that presents payment options. The actual finalization is `complete_checkout`.
 
 Tools not in the mapping are skipped by default. Set `track_all_tools=True` to
 record them as generic `request` events.
@@ -378,7 +386,7 @@ clustering on `event_type`, `checkout_session_id`, `merchant_host`.
 | Field | Type | Mode | Description |
 |---|---|---|---|
 | `checkout_session_id` | `STRING` | `NULLABLE` | Checkout session identifier |
-| `checkout_status` | `STRING` | `NULLABLE` | Session state: `incomplete`, `requires_escalation`, `ready_for_complete`, `completed`, `canceled` |
+| `checkout_status` | `STRING` | `NULLABLE` | Session state: `incomplete`, `requires_escalation`, `ready_for_complete`, `complete_in_progress`, `completed`, `canceled`. Only populated for checkout responses (not orders or carts). |
 | `order_id` | `STRING` | `NULLABLE` | Order ID (from `checkout.order.id` or direct) |
 
 ### Financial (Minor Units)
@@ -507,11 +515,15 @@ classifier handles all UCP resource types:
 | Event Type | Trigger | Description |
 |---|---|---|
 | `order_created` | `POST /orders` | Order created |
-| `order_updated` | `GET /orders/{id}` | Order status polled (generic) |
-| `order_shipped` | Shipping simulation | Order shipped (fulfillment event) |
+| `order_updated` | `GET /orders/{id}` or generic webhook | Order status polled (generic) |
+| `order_shipped` | Shipping simulation or webhook (status=`shipped`) | Order shipped (fulfillment event) |
 | `order_delivered` | `GET /orders/{id}` (status=`delivered`) or webhook | Order delivered to buyer |
 | `order_returned` | `GET /orders/{id}` (status=`returned`) or webhook | Order returned by buyer |
 | `order_canceled` | `GET /orders/{id}` (status=`canceled`) or webhook | Order canceled |
+
+Webhook paths include both the upstream partner format (`POST /webhooks/partners/{id}/events/order`,
+classified by the order status in the **request** body) and legacy paths (`/webhooks/order-delivered`,
+etc.). Webhook 4xx/5xx responses classify as `error`.
 
 ### Discovery & Capability Events
 

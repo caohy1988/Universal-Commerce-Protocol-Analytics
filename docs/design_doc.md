@@ -110,10 +110,10 @@ Platform (Agent)                    Business (Merchant)
 ### 3.3 Data Flow
 
 1. The middleware or event hook captures raw HTTP method, path, status code, request body, and response body.
-2. `UCPResponseParser.classify()` maps the HTTP operation to a UCP event type using strict regex matching on well-known UCP paths (e.g. `/checkout-sessions`, `/orders`, `/.well-known/ucp`).
+2. `UCPResponseParser.classify()` maps the HTTP operation to a UCP event type using strict regex matching on well-known UCP paths (e.g. `/checkout-sessions`, `/orders`, `/.well-known/ucp`, `/webhooks`). For webhook paths, the classifier accepts an optional `request_body` parameter since the order payload is in the request body (the response is just an ack like `{"status": "ok"}`).
 3. `UCPResponseParser.extract()` parses the UCP JSON response to extract structured fields: session ID, status, totals (all 7 spec types), line items, payment instruments/handlers, fulfillment, capabilities, extensions, discount codes/applied, checkout metadata (expires_at, continue_url), order details (permalink_url, fulfillment expectations/events), and errors.
 4. The event is serialized into a flat BigQuery row and enqueued in the `AsyncBigQueryWriter` buffer.
-5. When buffer reaches `batch_size` (default 50), rows flush to BigQuery via streaming insert (run in a background thread via `asyncio.to_thread()` to avoid blocking the event loop). Remaining rows flush on `tracker.close()`.
+5. When buffer reaches `batch_size` (default 50), rows flush to BigQuery via streaming insert (run in a background thread via `asyncio.to_thread()` to avoid blocking the event loop). On `tracker.close()`, any in-flight fire-and-forget recording tasks are awaited first, then remaining buffered rows are flushed.
 
 ### 3.4 Lazy Loading and Optional Dependencies
 
@@ -160,6 +160,12 @@ Events are automatically classified from HTTP method + path + response body. Pat
 | `GET /orders/{id}` *(status=delivered)* | `order_delivered` | Delivery confirmed |
 | `GET /orders/{id}` *(status=returned)* | `order_returned` | Return processed |
 | `GET /orders/{id}` *(status=canceled)* | `order_canceled` | Order canceled |
+| `POST /webhooks/partners/{id}/events/order` | *(by request body status)* | Upstream partner webhook — classifies as `order_shipped`, `order_delivered`, `order_returned`, `order_canceled`, or `order_updated` based on the order status in the request body |
+| `POST /webhooks/order-delivered` | `order_delivered` | Legacy webhook path |
+| `POST /webhooks/order-returned` | `order_returned` | Legacy webhook path |
+| `POST /webhooks/order-canceled` | `order_canceled` | Legacy webhook path |
+
+**Note:** For webhook paths, the order payload is in the **request** body (the response is typically an ack like `{"status": "ok"}`). The classifier and tracker use `request_body` for both classification and field extraction on webhook paths. Webhook 4xx/5xx responses classify as `error` rather than falling through to `order_updated`.
 
 #### Identity (3)
 
@@ -203,8 +209,11 @@ For MCP and A2A transports, `classify_jsonrpc()` maps tool names to event types 
 | `discover_merchant`, `a2a.ucp.discover` | `profile_discovered` |
 | `create_checkout`, `a2a.ucp.checkout.create` | `checkout_session_created` |
 | `complete_checkout`, `a2a.ucp.checkout.complete` | `checkout_session_completed` |
+| `add_to_checkout`, `remove_from_checkout`, `update_customer_details` | `checkout_session_updated` |
+| `start_payment` | `checkout_session_updated` (pre-completion step) |
 | `create_cart`, `a2a.ucp.cart.create` | `cart_created` |
 | `get_order`, `a2a.ucp.order.get` | `order_updated` (refined by response body status) |
+| `order_event_webhook` | *(by request body status)* |
 | `link_identity`, `a2a.ucp.identity.link` | `identity_link_initiated` |
 | `negotiate_capability`, `a2a.ucp.capability.negotiate` | `capability_negotiated` |
 
@@ -298,6 +307,7 @@ Each state transition generates a corresponding analytics event, enabling precis
 - **Checkout metadata:** Extracts `expires_at` and `continue_url` from the checkout session.
 - **Order model:** Extracts `checkout.order` as a nested object (not flat `order_id`), including `permalink_url` and fulfillment `expectations[]`/`events[]`.
 - **Session-order correlation:** Distinguishes checkout sessions from orders by checking for `checkout_id` (present on orders, absent on checkouts).
+- **Checkout status scoping:** The `checkout_status` field is only populated for actual checkout responses, not order or cart responses. This uses two guards: (1) bodies with `checkout_id` are orders (skipped), and (2) the status value must be a known checkout status (`incomplete`, `requires_escalation`, `ready_for_complete`, `complete_in_progress`, `completed`, `canceled`). This prevents order statuses like `shipped` or `delivered` from polluting `checkout_status`.
 
 ### 6.2 PII Redaction
 
@@ -326,7 +336,7 @@ On first write, the writer lazily initializes the BigQuery client, creates datas
 
 - **Async-safe:** All buffer operations (enqueue, flush, re-queue) are protected by an `asyncio.Lock`.
 - **Max buffer size:** The writer caps the in-memory buffer at `max_buffer_size` (default: 10,000). When the buffer is full, the oldest event is dropped and a warning is logged. This prevents unbounded memory growth if BigQuery is persistently unreachable.
-- **Retry on failure:** Failed BigQuery inserts are re-queued to the front of the buffer for retry on next flush, also respecting the max buffer size cap.
+- **Retry on failure:** If `insert_rows_json` raises an exception (e.g. network error), the entire batch is re-queued to the front of the buffer for retry on next flush. For **partial** insert errors (some rows accepted, some rejected), only the failed rows — identified by their index in the BQ error response — are re-queued. This prevents successful rows from being duplicated. Both paths respect the max buffer size cap.
 
 ---
 
@@ -334,9 +344,9 @@ On first write, the writer lazily initializes the BigQuery client, creates datas
 
 ### 8.1 FastAPI Middleware (Merchant Server)
 
-`UCPAnalyticsMiddleware` is a Starlette `BaseHTTPMiddleware` that filters by UCP path prefixes (`/checkout-sessions`, `/.well-known/ucp`, `/orders`, `/carts`, `/identity`, `/testing/simulate`). For matching requests: reads request body, executes handler, captures response, measures latency.
+`UCPAnalyticsMiddleware` is a Starlette `BaseHTTPMiddleware` that filters by UCP path prefixes (`/checkout-sessions`, `/.well-known/ucp`, `/orders`, `/carts`, `/identity`, `/testing/simulate`, `/webhooks`). For webhook paths, the tracker uses the request body (which contains the order payload) for both classification and field extraction, since the response is typically just an ack. For matching requests: reads request body, executes handler, captures response, measures latency.
 
-Analytics recording is fire-and-forget: the middleware dispatches `tracker.record_http()` via `asyncio.create_task()` so it does not block the HTTP response. Response headers (including multi-value headers like `set-cookie`) are preserved using raw header passthrough.
+Analytics recording is fire-and-forget: the middleware dispatches `tracker.record_http()` via `asyncio.create_task()` so it does not block the HTTP response. Each task is registered on the tracker via `tracker.register_pending_task()`, allowing `tracker.close()` to drain all in-flight tasks before flushing the buffer. This means the shutdown pattern is simply `await tracker.close()` — no need to reference the middleware instance (which is constructed internally by `app.add_middleware()` and not directly accessible). Response headers (including multi-value headers like `set-cookie`) are preserved using raw header passthrough.
 
 The middleware is lazy-loaded in `__init__.py` via `__getattr__`, so importing the core package does not require `starlette` to be installed.
 

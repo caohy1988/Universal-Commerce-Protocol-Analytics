@@ -1,5 +1,6 @@
 """Tests for UCPAnalyticsTracker."""
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, patch
 
@@ -100,6 +101,45 @@ class TestRecordHttp:
         assert event.request_id == "req_456"
 
 
+    async def test_webhook_uses_request_body(self, tracker, mock_writer):
+        """Webhook: order payload in request_body, response is ack."""
+        order_payload = {
+            "id": "order_xyz",
+            "checkout_id": "chk_abc",
+            "status": "shipped",
+        }
+        event = await tracker.record_http(
+            method="POST",
+            url="https://merchant.example.com/webhooks/partners/p1/events/order",
+            status_code=200,
+            request_body=order_payload,
+            response_body={"status": "ok"},
+        )
+
+        assert event.event_type == "order_shipped"
+        assert event.order_id == "order_xyz"
+        assert event.checkout_session_id == "chk_abc"
+
+
+    async def test_singular_webhook_uses_request_body(self, tracker, mock_writer):
+        """Legacy /webhook/ (singular) should also use request_body."""
+        order_payload = {
+            "id": "order_abc",
+            "checkout_id": "chk_xyz",
+            "status": "delivered",
+        }
+        event = await tracker.record_http(
+            method="POST",
+            url="https://merchant.example.com/webhook/order-delivered",
+            status_code=200,
+            request_body=order_payload,
+            response_body={"status": "ok"},
+        )
+
+        assert event.order_id == "order_abc"
+        assert event.checkout_session_id == "chk_xyz"
+
+
 class TestPIIRedaction:
     async def test_redacts_configured_fields(self, mock_writer):
         tracker = UCPAnalyticsTracker(
@@ -174,3 +214,18 @@ class TestFlushAndClose:
     async def test_close_delegates(self, tracker, mock_writer):
         await tracker.close()
         mock_writer.close.assert_awaited_once()
+
+    async def test_close_drains_pending_tasks(self, tracker, mock_writer):
+        """close() should await in-flight tasks before flushing."""
+        completed = []
+
+        async def slow_work():
+            await asyncio.sleep(0.01)
+            completed.append(True)
+
+        task = asyncio.create_task(slow_work())
+        tracker.register_pending_task(task)
+
+        await tracker.close()
+        assert completed == [True]
+        assert len(tracker._pending_tasks) == 0

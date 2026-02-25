@@ -38,7 +38,7 @@ from ucp_analytics import (
 )
 
 # ==========================================================================
-# Config
+# Config — set GCP_PROJECT_ID env var, or edit the fallback below.
 # ==========================================================================
 
 APP_NAME = "bq_demo"

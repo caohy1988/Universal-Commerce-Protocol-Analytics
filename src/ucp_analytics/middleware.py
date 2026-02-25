@@ -15,7 +15,7 @@ Usage::
 
     @app.on_event("shutdown")
     async def shutdown():
-        await tracker.close()
+        await tracker.close()  # drains in-flight tasks, then flushes
 """
 
 from __future__ import annotations
@@ -55,6 +55,8 @@ class UCPAnalyticsMiddleware(BaseHTTPMiddleware):
         "/orders",
         "/identity",
         "/testing/simulate",
+        "/webhooks",
+        "/webhook",
     )
 
     def __init__(self, app: Any, tracker: Any) -> None:
@@ -98,10 +100,11 @@ class UCPAnalyticsMiddleware(BaseHTTPMiddleware):
         except Exception:
             pass
 
-        # Record the event (fire-and-forget; don't block the response)
+        # Record the event (fire-and-forget; don't block the response).
+        # Tasks are tracked on the tracker so tracker.close() drains them.
         try:
             headers = dict(request.headers)
-            asyncio.create_task(
+            task = asyncio.create_task(
                 self.tracker.record_http(
                     method=request.method,
                     url=str(request.url),
@@ -113,6 +116,7 @@ class UCPAnalyticsMiddleware(BaseHTTPMiddleware):
                     request_headers=headers,
                 )
             )
+            self.tracker.register_pending_task(task)
         except Exception:
             logger.exception("UCP analytics recording failed")
 
@@ -127,3 +131,14 @@ class UCPAnalyticsMiddleware(BaseHTTPMiddleware):
         # Preserve all original headers including multi-value ones (e.g. set-cookie)
         new_response.raw_headers = response.raw_headers
         return new_response
+
+    async def drain_pending(self) -> None:
+        """Await all in-flight recording tasks.
+
+        .. deprecated::
+            Pending tasks are now tracked on the tracker itself.
+            ``tracker.close()`` drains automatically.  This method
+            delegates to ``self.tracker.drain_pending()`` for
+            backwards compatibility.
+        """
+        await self.tracker.drain_pending()

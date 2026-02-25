@@ -221,7 +221,25 @@ class AsyncBigQueryWriter:
                 client.insert_rows_json, self.full_table_id, batch
             )
             if errors:
-                logger.error("BQ insert errors (%d rows): %s", len(batch), errors[:3])
+                # Extract only the failed rows by index
+                failed_indices = {
+                    e["index"] for e in errors if isinstance(e, dict) and "index" in e
+                }
+                failed_rows = [
+                    batch[i] for i in sorted(failed_indices) if i < len(batch)
+                ]
+                logger.error(
+                    "BQ insert errors (%d/%d rows failed): %s",
+                    len(failed_rows),
+                    len(batch),
+                    errors[:3],
+                )
+                if failed_rows:
+                    async with self._lock:
+                        requeued = failed_rows + self._buffer
+                        if len(requeued) > self.max_buffer_size:
+                            requeued = requeued[: self.max_buffer_size]
+                        self._buffer = requeued
             else:
                 logger.debug("Flushed %d UCP events", len(batch))
         except Exception:

@@ -21,7 +21,7 @@ Three integration points — pick any or combine:
 |---|---|---|
 | **FastAPI middleware** | Merchant server | `app.add_middleware(UCPAnalyticsMiddleware, tracker=t)` |
 | **HTTPX event hook** | Agent / platform | `httpx.AsyncClient(event_hooks={"response": [hook]})` |
-| **ADK plugin** *(optional)* | Google ADK agent | `Runner(plugins=[UCPAdkPlugin(...)])` |
+| **ADK plugin** *(optional)* | Google ADK agent | `Runner(plugins=[UCPAgentAnalyticsPlugin(...)])` |
 
 ```
  Platform (Agent)                    Business (Merchant)
@@ -60,8 +60,8 @@ pip install ucp-analytics[adk]
 Or install from source:
 
 ```bash
-git clone https://github.com/Universal-Commerce-Protocol/analytics.git
-cd analytics
+git clone https://github.com/haiyuan-eng-google/Universal-Commerce-Protocol-Analytics.git
+cd Universal-Commerce-Protocol-Analytics
 uv sync
 ```
 
@@ -83,7 +83,7 @@ app.add_middleware(UCPAnalyticsMiddleware, tracker=tracker)
 
 @app.on_event("shutdown")
 async def shutdown():
-    await tracker.close()
+    await tracker.close()  # drains in-flight tasks, then flushes
 ```
 
 > **Note:** `UCPAnalyticsMiddleware` requires the `[fastapi]` extra.
@@ -105,8 +105,8 @@ hook = UCPClientEventHook(tracker)
 client = httpx.AsyncClient(event_hooks={"response": [hook]})
 ```
 
-Every call to `/checkout-sessions`, `/.well-known/ucp`, `/orders`, `/carts`, etc.
-is automatically classified and written to BigQuery.
+Every call to `/checkout-sessions`, `/.well-known/ucp`, `/orders`, `/carts`,
+`/webhooks`, etc. is automatically classified and written to BigQuery.
 
 ## Events Tracked
 
@@ -142,6 +142,7 @@ All 27 UCP event types are auto-classified from HTTP method + path + response bo
 | `GET /orders/{id}` *(status=delivered)* | `order_delivered` |
 | `GET /orders/{id}` *(status=returned)* | `order_returned` |
 | `GET /orders/{id}` *(status=canceled)* | `order_canceled` |
+| `POST /webhooks/partners/{id}/events/order` | *(by request body status)* |
 
 ### Identity (3)
 
@@ -173,6 +174,9 @@ All 27 UCP event types are auto-classified from HTTP method + path + response bo
 |---|---|
 | Any unmatched path, status >= 400 | `error` |
 | Any unmatched path, status < 400 | `request` |
+
+Webhook paths use the **request body** (order payload) for classification since
+the response is typically an ack. Webhook 4xx/5xx responses classify as `error`.
 
 ## Configuration
 
