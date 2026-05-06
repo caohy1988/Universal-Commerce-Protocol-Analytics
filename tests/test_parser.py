@@ -1,60 +1,87 @@
 """Tests for UCPResponseParser."""
 
 import pytest
-from ucp_analytics.parser import UCPResponseParser
+
 from ucp_analytics.events import UCPEventType
+from ucp_analytics.parser import UCPResponseParser
 
 
 class TestClassify:
     def test_discovery(self):
-        assert UCPResponseParser.classify(
-            "GET", "/.well-known/ucp", 200, None
-        ) == UCPEventType.PROFILE_DISCOVERED
+        assert (
+            UCPResponseParser.classify("GET", "/.well-known/ucp", 200, None)
+            == UCPEventType.PROFILE_DISCOVERED
+        )
 
     def test_create_checkout(self):
-        assert UCPResponseParser.classify(
-            "POST", "/checkout-sessions", 201, {}
-        ) == UCPEventType.CHECKOUT_SESSION_CREATED
+        assert (
+            UCPResponseParser.classify("POST", "/checkout-sessions", 201, {})
+            == UCPEventType.CHECKOUT_SESSION_CREATED
+        )
 
     def test_update_checkout(self):
-        assert UCPResponseParser.classify(
-            "PUT", "/checkout-sessions/chk_123", 200, {"status": "ready_for_complete"}
-        ) == UCPEventType.CHECKOUT_SESSION_UPDATED
+        assert (
+            UCPResponseParser.classify(
+                "PUT",
+                "/checkout-sessions/chk_123",
+                200,
+                {"status": "ready_for_complete"},
+            )
+            == UCPEventType.CHECKOUT_SESSION_UPDATED
+        )
 
     def test_update_escalation(self):
-        assert UCPResponseParser.classify(
-            "PUT", "/checkout-sessions/chk_123", 200, {"status": "requires_escalation"}
-        ) == UCPEventType.CHECKOUT_ESCALATION
+        assert (
+            UCPResponseParser.classify(
+                "PUT",
+                "/checkout-sessions/chk_123",
+                200,
+                {"status": "requires_escalation"},
+            )
+            == UCPEventType.CHECKOUT_ESCALATION
+        )
 
     def test_complete_checkout(self):
-        assert UCPResponseParser.classify(
-            "POST", "/checkout-sessions/chk_123/complete", 200, {}
-        ) == UCPEventType.CHECKOUT_SESSION_COMPLETED
+        assert (
+            UCPResponseParser.classify(
+                "POST", "/checkout-sessions/chk_123/complete", 200, {}
+            )
+            == UCPEventType.CHECKOUT_SESSION_COMPLETED
+        )
 
     def test_cancel_checkout(self):
-        assert UCPResponseParser.classify(
-            "POST", "/checkout-sessions/chk_123/cancel", 200, {}
-        ) == UCPEventType.CHECKOUT_SESSION_CANCELED
+        assert (
+            UCPResponseParser.classify(
+                "POST", "/checkout-sessions/chk_123/cancel", 200, {}
+            )
+            == UCPEventType.CHECKOUT_SESSION_CANCELED
+        )
 
     def test_get_checkout(self):
-        assert UCPResponseParser.classify(
-            "GET", "/checkout-sessions/chk_123", 200, {}
-        ) == UCPEventType.CHECKOUT_SESSION_GET
+        assert (
+            UCPResponseParser.classify("GET", "/checkout-sessions/chk_123", 200, {})
+            == UCPEventType.CHECKOUT_SESSION_GET
+        )
 
     def test_error(self):
-        assert UCPResponseParser.classify(
-            "POST", "/checkout-sessions", 500, {}
-        ) == UCPEventType.ERROR
+        assert (
+            UCPResponseParser.classify("POST", "/checkout-sessions", 500, {})
+            == UCPEventType.ERROR
+        )
 
     def test_order(self):
-        assert UCPResponseParser.classify(
-            "POST", "/orders", 201, {}
-        ) == UCPEventType.ORDER_CREATED
+        assert (
+            UCPResponseParser.classify("POST", "/orders", 201, {})
+            == UCPEventType.ORDER_CREATED
+        )
 
     def test_simulate_shipping(self):
-        assert UCPResponseParser.classify(
-            "POST", "/testing/simulate-shipping/order_123", 200, {}
-        ) == UCPEventType.ORDER_SHIPPED
+        assert (
+            UCPResponseParser.classify(
+                "POST", "/testing/simulate-shipping/order_123", 200, {}
+            )
+            == UCPEventType.ORDER_SHIPPED
+        )
 
 
 class TestExtract:
@@ -74,7 +101,11 @@ class TestExtract:
         "status": "ready_for_complete",
         "currency": "USD",
         "line_items": [
-            {"id": "li_1", "item": {"id": "item_1", "title": "Rose Bouquet", "price": 2500}, "quantity": 2},
+            {
+                "id": "li_1",
+                "item": {"id": "item_1", "title": "Rose Bouquet", "price": 2500},
+                "quantity": 2,
+            },
         ],
         "totals": [
             {"type": "subtotal", "amount": 5000},
@@ -98,7 +129,12 @@ class TestExtract:
             ]
         },
         "messages": [
-            {"type": "error", "code": "missing", "content": "Phone required", "severity": "recoverable"},
+            {
+                "type": "error",
+                "code": "missing",
+                "content": "Phone required",
+                "severity": "recoverable",
+            },
         ],
     }
 
@@ -138,3 +174,88 @@ class TestExtract:
         fields = UCPResponseParser.extract(order)
         assert fields["order_id"] == "order_xyz"
         assert fields["checkout_session_id"] == "chk_abc"
+
+    def test_extract_checkout_via_ucp_sdk_models(self):
+        pytest.importorskip("ucp_sdk.models.schemas.shopping.checkout")
+
+        checkout = {
+            "ucp": {
+                "version": "2026-04-08",
+                "capabilities": {
+                    "dev.ucp.shopping.checkout": [
+                        {"version": "2026-04-08"},
+                    ],
+                    "dev.ucp.shopping.fulfillment": [
+                        {
+                            "version": "2026-04-08",
+                            "extends": "dev.ucp.shopping.checkout",
+                        },
+                    ],
+                },
+                "payment_handlers": {
+                    "dev.example.pay": [
+                        {"version": "2026-04-08", "id": "gpay"},
+                    ],
+                },
+            },
+            "id": "chk_model",
+            "status": "ready_for_complete",
+            "currency": "USD",
+            "line_items": [
+                {
+                    "id": "li_1",
+                    "item": {"id": "sku_rose", "title": "Rose", "price": 2500},
+                    "quantity": 2,
+                    "totals": [
+                        {"type": "subtotal", "amount": 5000},
+                        {"type": "total", "amount": 5000},
+                    ],
+                },
+            ],
+            "totals": [
+                {"type": "subtotal", "amount": 5000},
+                {"type": "fulfillment", "amount": 599},
+                {"type": "tax", "amount": 400},
+                {"type": "items_discount", "amount": -500},
+                {"type": "total", "amount": 5499},
+            ],
+            "links": [
+                {"type": "terms_of_service", "url": "https://example.com/terms"},
+            ],
+            "payment": {
+                "instruments": [
+                    {
+                        "id": "pi_1",
+                        "handler_id": "gpay",
+                        "type": "wallet",
+                        "selected": True,
+                        "display": {"brand": "google_pay"},
+                    },
+                ],
+            },
+            "messages": [
+                {
+                    "type": "error",
+                    "code": "missing_phone",
+                    "content": "Phone required",
+                    "severity": "recoverable",
+                },
+            ],
+        }
+
+        fields = UCPResponseParser.extract(checkout)
+
+        assert fields["checkout_session_id"] == "chk_model"
+        assert fields["checkout_status"] == "ready_for_complete"
+        assert fields["ucp_version"] == "2026-04-08"
+        assert fields["line_item_count"] == 1
+        assert fields["subtotal_amount"] == 5000
+        assert fields["shipping_amount"] == 599
+        assert fields["discount_amount"] == -500
+        assert fields["total_amount"] == 5499
+        assert fields["payment_handler_id"] == "gpay"
+        assert fields["payment_instrument_type"] == "wallet"
+        assert fields["payment_brand"] == "google_pay"
+        assert fields["error_code"] == "missing_phone"
+        assert "dev.ucp.shopping.fulfillment" in fields["capabilities_json"]
+        assert "dev.ucp.shopping.checkout" in fields["extensions_json"]
