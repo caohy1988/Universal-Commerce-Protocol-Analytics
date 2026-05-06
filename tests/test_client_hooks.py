@@ -100,3 +100,83 @@ class TestUCPClientEventHook:
 
         call_kwargs = mock_tracker.record_http.call_args.kwargs
         assert call_kwargs["response_body"] is None
+
+
+class TestUCPClientEventHookPathFiltering:
+    """The hook's fast-path filter must mirror the segment-aware semantics
+    the middleware uses: mounted UCP base paths are accepted, segment-prefix
+    lookalikes are rejected. Without this, /api/catalogue/search and
+    /api/orders-history would be silently captured as UCP traffic."""
+
+    @pytest.fixture
+    def mock_tracker(self):
+        tracker = MagicMock()
+        tracker.record_http = AsyncMock()
+        return tracker
+
+    @pytest.fixture
+    def hook(self, mock_tracker):
+        return UCPClientEventHook(mock_tracker)
+
+    async def test_captures_mounted_catalog_search(self, hook, mock_tracker):
+        resp = _make_response(
+            url="https://shop.example.com/ucp/v1/catalog/search",
+            method="POST",
+            status_code=200,
+            json_body={"products": []},
+        )
+        await hook(resp)
+        mock_tracker.record_http.assert_awaited_once()
+
+    async def test_captures_mounted_checkout(self, hook, mock_tracker):
+        resp = _make_response(
+            url="https://shop.example.com/api/v2/checkout-sessions",
+            method="POST",
+            status_code=201,
+            json_body={"id": "chk_xyz"},
+        )
+        await hook(resp)
+        mock_tracker.record_http.assert_awaited_once()
+
+    async def test_skips_catalogue_lookalike(self, hook, mock_tracker):
+        # `/api/catalogue/search` shares a substring with `/catalog`
+        # but is not a UCP path. The plain `p in path` filter would
+        # have falsely captured it.
+        resp = _make_response(
+            url="https://shop.example.com/api/catalogue/search",
+            method="POST",
+            status_code=200,
+            json_body={"results": []},
+        )
+        await hook(resp)
+        mock_tracker.record_http.assert_not_awaited()
+
+    async def test_skips_orders_history_lookalike(self, hook, mock_tracker):
+        resp = _make_response(
+            url="https://shop.example.com/api/orders-history",
+            method="GET",
+            status_code=200,
+            json_body={"orders": []},
+        )
+        await hook(resp)
+        mock_tracker.record_http.assert_not_awaited()
+
+    async def test_skips_identity_card_lookalike(self, hook, mock_tracker):
+        resp = _make_response(
+            url="https://shop.example.com/api/identity-card",
+            method="GET",
+            status_code=200,
+            json_body={"card_id": "abc"},
+        )
+        await hook(resp)
+        mock_tracker.record_http.assert_not_awaited()
+
+    async def test_skips_carts_preview_lookalike(self, hook, mock_tracker):
+        resp = _make_response(
+            url="https://shop.example.com/api/carts-preview",
+            method="GET",
+            status_code=200,
+            json_body={"items": []},
+        )
+        await hook(resp)
+        mock_tracker.record_http.assert_not_awaited()

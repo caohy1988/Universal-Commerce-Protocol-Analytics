@@ -35,6 +35,11 @@ class UCPEventType(str, Enum):
     CART_UPDATED = "cart_updated"
     CART_CANCELED = "cart_canceled"
 
+    # Catalog discovery (maps to REST operations on /catalog/*)
+    CATALOG_SEARCH = "catalog_search"
+    CATALOG_LOOKUP = "catalog_lookup"
+    CATALOG_PRODUCT_GET = "catalog_product_get"
+
     # Order lifecycle (webhook-based in UCP)
     ORDER_CREATED = "order_created"
     ORDER_UPDATED = "order_updated"
