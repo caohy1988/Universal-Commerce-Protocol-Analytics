@@ -31,6 +31,8 @@ from typing import Any
 
 import httpx
 
+from ucp_analytics._path_match import path_matches_marker
+
 logger = logging.getLogger(__name__)
 
 
@@ -45,6 +47,7 @@ class UCPClientEventHook:
     UCP_PATH_PATTERNS = (
         "/checkout-sessions",
         "/carts",
+        "/catalog",
         "/.well-known/ucp",
         "/orders",
         "/identity",
@@ -61,8 +64,12 @@ class UCPClientEventHook:
         request = response.request
         path = request.url.path
 
-        # Skip non-UCP requests
-        if not any(p in path for p in self.UCP_PATH_PATTERNS):
+        # Skip non-UCP requests. UCP REST paths in the spec are relative
+        # to the platform-advertised base endpoint, so a real merchant can
+        # mount the marker segments under a prefix like /ucp/v1, /api/v2.
+        # Use the segment-aware helper so /api/catalogue/search,
+        # /api/orders-history, etc. don't trip the filter.
+        if not any(path_matches_marker(path, p) for p in self.UCP_PATH_PATTERNS):
             return
 
         # Read response body

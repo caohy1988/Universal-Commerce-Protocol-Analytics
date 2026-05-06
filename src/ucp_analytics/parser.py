@@ -79,6 +79,15 @@ class UCPResponseParser:
         if re.search(r"/carts/[^/]+$", p) and m == "GET":
             return UCPEventType.CART_GET
 
+        # /catalog/{search,lookup,product}  POST  → catalog discovery
+        if m == "POST":
+            if re.search(r"/catalog/search/?$", p):
+                return UCPEventType.CATALOG_SEARCH
+            if re.search(r"/catalog/lookup/?$", p):
+                return UCPEventType.CATALOG_LOOKUP
+            if re.search(r"/catalog/product/?$", p):
+                return UCPEventType.CATALOG_PRODUCT_GET
+
         # /orders (strict: /orders or /orders/{id}, not /reorder etc.)
         if re.search(r"/orders(?:/[^/]+)?$", p):
             if m == "POST":
@@ -165,6 +174,9 @@ class UCPResponseParser:
         "update_cart": ("PUT", "/carts/{id}"),
         "cancel_cart": ("POST", "/carts/{id}/cancel"),
         "get_cart": ("GET", "/carts/{id}"),
+        "catalog_search": ("POST", "/catalog/search"),
+        "catalog_lookup": ("POST", "/catalog/lookup"),
+        "get_product": ("POST", "/catalog/product"),
         "create_order": ("POST", "/orders"),
         "get_order": ("GET", "/orders/{id}"),
         "discover": ("GET", "/.well-known/ucp"),
@@ -188,6 +200,9 @@ class UCPResponseParser:
         "a2a.ucp.cart.update": ("PUT", "/carts/{id}"),
         "a2a.ucp.cart.cancel": ("POST", "/carts/{id}/cancel"),
         "a2a.ucp.cart.get": ("GET", "/carts/{id}"),
+        "a2a.ucp.catalog.search": ("POST", "/catalog/search"),
+        "a2a.ucp.catalog.lookup": ("POST", "/catalog/lookup"),
+        "a2a.ucp.catalog.product": ("POST", "/catalog/product"),
         "a2a.ucp.order.create": ("POST", "/orders"),
         "a2a.ucp.order.get": ("GET", "/orders/{id}"),
         "a2a.ucp.discover": ("GET", "/.well-known/ucp"),
@@ -279,8 +294,12 @@ class UCPResponseParser:
             if "checkout_id" not in body:
                 status_val = body["status"]
                 _CHECKOUT_STATUSES = {
-                    "incomplete", "requires_escalation", "ready_for_complete",
-                    "complete_in_progress", "completed", "canceled",
+                    "incomplete",
+                    "requires_escalation",
+                    "ready_for_complete",
+                    "complete_in_progress",
+                    "completed",
+                    "canceled",
                 }
                 if status_val in _CHECKOUT_STATUSES:
                     result["checkout_status"] = status_val

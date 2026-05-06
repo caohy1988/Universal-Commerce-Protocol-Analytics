@@ -89,6 +89,32 @@ class TestClassify:
             == UCPEventType.CART_CANCELED
         )
 
+    def test_catalog_search(self):
+        assert (
+            UCPResponseParser.classify("POST", "/catalog/search", 200, {})
+            == UCPEventType.CATALOG_SEARCH
+        )
+
+    def test_catalog_lookup(self):
+        assert (
+            UCPResponseParser.classify("POST", "/catalog/lookup", 200, {})
+            == UCPEventType.CATALOG_LOOKUP
+        )
+
+    def test_catalog_product_get(self):
+        assert (
+            UCPResponseParser.classify("POST", "/catalog/product", 200, {})
+            == UCPEventType.CATALOG_PRODUCT_GET
+        )
+
+    def test_catalog_search_under_base_path(self):
+        # OpenAPI paths are relative to the discovered REST endpoint;
+        # real merchants commonly mount UCP under /ucp/v1, /api/v2, …
+        assert (
+            UCPResponseParser.classify("POST", "/ucp/v1/catalog/search", 200, {})
+            == UCPEventType.CATALOG_SEARCH
+        )
+
     # --- Other ---
 
     def test_error(self):
@@ -548,6 +574,30 @@ class TestClassifyJsonRPC:
             == UCPEventType.CART_CREATED
         )
 
+    def test_mcp_catalog_search(self):
+        assert (
+            UCPResponseParser.classify_jsonrpc("catalog_search")
+            == UCPEventType.CATALOG_SEARCH
+        )
+
+    def test_mcp_catalog_lookup(self):
+        assert (
+            UCPResponseParser.classify_jsonrpc("catalog_lookup")
+            == UCPEventType.CATALOG_LOOKUP
+        )
+
+    def test_mcp_catalog_product_get(self):
+        assert (
+            UCPResponseParser.classify_jsonrpc("get_product")
+            == UCPEventType.CATALOG_PRODUCT_GET
+        )
+
+    def test_a2a_catalog_search(self):
+        assert (
+            UCPResponseParser.classify_jsonrpc("a2a.ucp.catalog.search")
+            == UCPEventType.CATALOG_SEARCH
+        )
+
     def test_mcp_create_order(self):
         assert (
             UCPResponseParser.classify_jsonrpc("create_order")
@@ -702,9 +752,7 @@ class TestWebhookClassification:
 
     def test_generic_webhook_fallback(self):
         assert (
-            UCPResponseParser.classify(
-                "POST", "/webhooks/some-other-event", 200, {}
-            )
+            UCPResponseParser.classify("POST", "/webhooks/some-other-event", 200, {})
             == UCPEventType.ORDER_UPDATED
         )
 
@@ -720,9 +768,7 @@ class TestWebhookClassification:
     def test_webhook_error_400(self):
         """Webhook 4xx should classify as error."""
         assert (
-            UCPResponseParser.classify(
-                "POST", "/webhooks/some-event", 400, {}
-            )
+            UCPResponseParser.classify("POST", "/webhooks/some-event", 400, {})
             == UCPEventType.ERROR
         )
 
