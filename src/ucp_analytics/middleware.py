@@ -30,6 +30,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
+from ucp_analytics._path_match import path_matches_marker
+
 logger = logging.getLogger(__name__)
 
 
@@ -51,6 +53,7 @@ class UCPAnalyticsMiddleware(BaseHTTPMiddleware):
     UCP_PATH_PREFIXES = (
         "/checkout-sessions",
         "/carts",
+        "/catalog",
         "/.well-known/ucp",
         "/orders",
         "/identity",
@@ -66,8 +69,13 @@ class UCPAnalyticsMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         path = request.url.path
 
-        # Fast path: skip non-UCP requests
-        if not any(path.startswith(p) for p in self.UCP_PATH_PREFIXES):
+        # Fast path: skip non-UCP requests. UCP REST paths in the spec are
+        # relative to the platform-advertised base endpoint, so a real
+        # deployment can mount any of the marker segments under a prefix
+        # like /ucp/v1, /api/v2, /merchant/api/ucp/v1, etc. Use a
+        # segment-aware match so /api/catalogue/search doesn't trip the
+        # /catalog marker and /api/orders-history doesn't trip /orders.
+        if not any(path_matches_marker(path, p) for p in self.UCP_PATH_PREFIXES):
             return await call_next(request)
 
         # Read request body (for POST/PUT)
