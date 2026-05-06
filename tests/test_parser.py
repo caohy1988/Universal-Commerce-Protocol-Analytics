@@ -224,6 +224,82 @@ class TestClassify:
             == UCPEventType.IDENTITY_LINK_REVOKED
         )
 
+    # --- OAuth 2.0 + OpenID identity-linking flow ---
+
+    def test_oauth_authorization_metadata_discovery(self):
+        # RFC 8414 — auth-server metadata discovery is the start of an
+        # identity-linking flow.
+        assert (
+            UCPResponseParser.classify(
+                "GET", "/.well-known/oauth-authorization-server", 200, {}
+            )
+            == UCPEventType.IDENTITY_LINK_INITIATED
+        )
+
+    def test_openid_configuration_discovery(self):
+        assert (
+            UCPResponseParser.classify(
+                "GET", "/.well-known/openid-configuration", 200, {}
+            )
+            == UCPEventType.IDENTITY_LINK_INITIATED
+        )
+
+    def test_oauth_protected_resource_discovery(self):
+        # RFC 9728 — protected-resource metadata.
+        assert (
+            UCPResponseParser.classify(
+                "GET", "/.well-known/oauth-protected-resource", 200, {}
+            )
+            == UCPEventType.IDENTITY_LINK_INITIATED
+        )
+
+    def test_oauth_discovery_under_mounted_base(self):
+        # OAuth discovery paths can be mounted under a prefix the same
+        # way other UCP REST paths can.
+        assert (
+            UCPResponseParser.classify(
+                "GET",
+                "/api/v1/.well-known/oauth-authorization-server",
+                200,
+                {},
+            )
+            == UCPEventType.IDENTITY_LINK_INITIATED
+        )
+
+    def test_oauth2_authorize_initiated(self):
+        assert (
+            UCPResponseParser.classify("GET", "/oauth2/authorize", 200, {})
+            == UCPEventType.IDENTITY_LINK_INITIATED
+        )
+
+    def test_oauth2_token_completed(self):
+        # Token issuance is the moment the identity link becomes usable.
+        assert (
+            UCPResponseParser.classify("POST", "/oauth2/token", 200, {})
+            == UCPEventType.IDENTITY_LINK_COMPLETED
+        )
+
+    def test_oauth2_revoke_revoked(self):
+        assert (
+            UCPResponseParser.classify("POST", "/oauth2/revoke", 200, {})
+            == UCPEventType.IDENTITY_LINK_REVOKED
+        )
+
+    def test_oauth2_jwks_initiated(self):
+        # JWKS endpoint is part of the OAuth metadata surface — fetch
+        # before any token validation. Keep it under INITIATED rather
+        # than minting a separate event type for v0.
+        assert (
+            UCPResponseParser.classify("GET", "/oauth2/jwks", 200, {})
+            == UCPEventType.IDENTITY_LINK_INITIATED
+        )
+
+    def test_oauth2_token_under_mounted_base(self):
+        assert (
+            UCPResponseParser.classify("POST", "/api/v1/oauth2/token", 200, {})
+            == UCPEventType.IDENTITY_LINK_COMPLETED
+        )
+
 
 class TestExtract:
     # Sample checkout response using SDK/samples-aligned format

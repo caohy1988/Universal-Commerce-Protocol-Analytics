@@ -41,6 +41,16 @@ class UCPResponseParser:
         if p.endswith("/.well-known/ucp"):
             return UCPEventType.PROFILE_DISCOVERED
 
+        # OAuth / OpenID metadata discovery (RFC 8414, OIDC, RFC 9728).
+        # These are the start of an identity-linking flow — the platform
+        # fetches the business's auth metadata before driving an OAuth dance.
+        if (
+            p.endswith("/.well-known/oauth-authorization-server")
+            or p.endswith("/.well-known/openid-configuration")
+            or p.endswith("/.well-known/oauth-protected-resource")
+        ):
+            return UCPEventType.IDENTITY_LINK_INITIATED
+
         # /checkout-sessions  POST  → created
         if re.search(r"/checkout-sessions/?$", p) and m == "POST":
             return UCPEventType.CHECKOUT_SESSION_CREATED
@@ -138,13 +148,16 @@ class UCPResponseParser:
             # Generic webhook → treat as order update
             return UCPEventType.ORDER_UPDATED
 
-        # Identity linking (strict: /identity or /oauth paths)
-        if re.search(r"/(?:identity|oauth)(?:/|$)", p):
-            # /identity/revoke or DELETE → revoked
+        # Identity linking (strict: /identity, /oauth, or /oauth2 paths).
+        # The trailing oauth2? in the regex is necessary because /oauth
+        # alone wouldn't match /oauth2/token — the segment boundary
+        # `(?:/|$)` fails after `oauth` when the next char is `2`.
+        if re.search(r"/(?:identity|oauth2?)(?:/|$)", p):
+            # /identity/revoke, /oauth2/revoke, or DELETE → revoked
             if "/revoke" in p or m == "DELETE":
                 return UCPEventType.IDENTITY_LINK_REVOKED
-            # /identity/callback or /oauth/callback → completed
-            if "/callback" in p:
+            # OAuth callback or OAuth token endpoint finalize the link
+            if "/callback" in p or "/oauth2/token" in p:
                 return UCPEventType.IDENTITY_LINK_COMPLETED
             return UCPEventType.IDENTITY_LINK_INITIATED
 

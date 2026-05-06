@@ -64,6 +64,8 @@ class UCPAgentAnalyticsPlugin(BasePlugin):  # type: ignore[misc]
         "discover",
         "order",
         "identity",
+        "oauth",
+        "oauth2",
         "payment",
         "ucp_",
         "negotiate",
