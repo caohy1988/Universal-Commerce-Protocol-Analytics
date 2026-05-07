@@ -320,6 +320,9 @@ class UCPResponseParser:
         # --- ucp metadata envelope ---
         cls._extract_ucp_metadata(body.get("ucp"), result)
 
+        # --- context (UCP request-body Context object) ---
+        cls._extract_context_fields(body.get("context"), result)
+
         # --- discovery: payment.handlers at top level (sibling of ucp) ---
         cls._extract_discovery_payment(body.get("payment"), result)
 
@@ -406,6 +409,32 @@ class UCPResponseParser:
                 result["fee_amount"] = amount
             elif t_type == "total":
                 result["total_amount"] = amount
+
+    @classmethod
+    def _extract_context_fields(cls, context: Any, result: Dict[str, Any]) -> None:
+        """Extract analytics fields from a UCP request-body Context object.
+
+        Spec ref: ``source/schemas/shopping/types/context.json`` — top-level
+        properties are ``{address_country, address_region, postal_code,
+        intent, language, currency, eligibility}``. We capture intent /
+        language / currency as scalars and eligibility as a JSON blob of
+        reverse-domain identifiers. The three address fields are PII and
+        deferred to a later slice that lands the redaction policy alongside.
+        """
+        if not isinstance(context, dict):
+            return
+        intent = context.get("intent")
+        if intent:
+            result["context_intent"] = intent
+        language = context.get("language")
+        if language:
+            result["context_language"] = language
+        currency = context.get("currency")
+        if currency:
+            result["context_currency"] = currency
+        eligibility = context.get("eligibility")
+        if isinstance(eligibility, list) and eligibility:
+            result["context_eligibility_json"] = json.dumps(eligibility, default=str)
 
     @classmethod
     def _extract_ucp_metadata(cls, ucp_meta: Any, result: Dict[str, Any]) -> None:

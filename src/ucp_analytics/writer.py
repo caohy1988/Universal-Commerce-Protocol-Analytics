@@ -38,6 +38,11 @@ BQ_SCHEMA_FIELDS = [
     ("checkout_session_id", "STRING", "NULLABLE"),
     ("checkout_status", "STRING", "NULLABLE"),
     ("order_id", "STRING", "NULLABLE"),
+    # context (UCP request-body Context: intent, language, currency, eligibility)
+    ("context_intent", "STRING", "NULLABLE"),
+    ("context_language", "STRING", "NULLABLE"),
+    ("context_currency", "STRING", "NULLABLE"),
+    ("context_eligibility_json", "JSON", "NULLABLE"),
     # financial (spec total types: items_discount, subtotal, discount,
     # fulfillment, tax, fee, total)
     ("currency", "STRING", "NULLABLE"),
