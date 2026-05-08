@@ -118,7 +118,10 @@ class UCPAnalyticsTracker:
         # Classify (pass request_body for webhook flows where payload
         # is in the request and response is just an ack)
         event_type = UCPResponseParser.classify(
-            method, path, status_code, response_body,
+            method,
+            path,
+            status_code,
+            response_body,
             request_body=request_body,
         )
 
@@ -136,18 +139,33 @@ class UCPAnalyticsTracker:
             request_id=headers.get("request-id", ""),
         )
 
-        # Extract UCP fields from response (preferred) or request.
+        # Extract UCP fields from both request and response bodies.
+        # Response takes precedence on conflict (it's the merchant-
+        # confirmed state) but request-body-only fields — the new
+        # context_intent / context_language / context_currency /
+        # context_eligibility_json on a checkout-create or
+        # catalog-search request, idempotency-related metadata, etc.
+        # — survive even when the response has its own body.
         # For webhooks, the order payload is in the request body and
-        # the response is just an ack like {"status": "ok"}.
+        # the response is just an ack like {"status": "ok"}, so we
+        # extract only from the request body.
         is_webhook = "/webhook" in path
-        if is_webhook and request_body:
-            body_to_parse = request_body
+        if is_webhook:
+            # Webhooks normally carry the order payload in the request
+            # body, with the response being just an ack. Fall back to
+            # response_body when the caller only has the response side
+            # — matches the prior behavior so an
+            # order_delivered classification doesn't end up with an
+            # empty order_id / checkout_session_id.
+            bodies_to_parse: List[Optional[dict]] = [request_body or response_body]
         else:
-            body_to_parse = response_body or request_body
-        if body_to_parse and isinstance(body_to_parse, dict):
+            bodies_to_parse = [request_body, response_body]
+        for body in bodies_to_parse:
+            if not body or not isinstance(body, dict):
+                continue
             if self.redact_pii:
-                body_to_parse = self._redact(body_to_parse)
-            fields = UCPResponseParser.extract(body_to_parse)
+                body = self._redact(body)
+            fields = UCPResponseParser.extract(body)
             for key, val in fields.items():
                 if hasattr(event, key):
                     setattr(event, key, val)

@@ -100,7 +100,6 @@ class TestRecordHttp:
         assert event.idempotency_key == "idem_123"
         assert event.request_id == "req_456"
 
-
     async def test_webhook_uses_request_body(self, tracker, mock_writer):
         """Webhook: order payload in request_body, response is ack."""
         order_payload = {
@@ -120,6 +119,29 @@ class TestRecordHttp:
         assert event.order_id == "order_xyz"
         assert event.checkout_session_id == "chk_abc"
 
+    async def test_webhook_falls_back_to_response_body_when_no_request(
+        self, tracker, mock_writer
+    ):
+        """Webhook callers that only have the response side in hand must
+        still produce a populated row. Pin this fallback so the order
+        payload-extraction doesn't regress when the new request/response
+        merge logic short-circuits webhook flows."""
+        order_payload = {
+            "id": "order_123",
+            "checkout_id": "chk_123",
+            "status": "delivered",
+        }
+        event = await tracker.record_http(
+            method="POST",
+            url="https://merchant.example.com/webhooks/partners/p1/events/order",
+            status_code=200,
+            request_body=None,
+            response_body=order_payload,
+        )
+
+        assert event.event_type == "order_delivered"
+        assert event.order_id == "order_123"
+        assert event.checkout_session_id == "chk_123"
 
     async def test_singular_webhook_uses_request_body(self, tracker, mock_writer):
         """Legacy /webhook/ (singular) should also use request_body."""
@@ -138,6 +160,72 @@ class TestRecordHttp:
 
         assert event.order_id == "order_abc"
         assert event.checkout_session_id == "chk_xyz"
+
+    async def test_request_body_context_survives_response_body(
+        self, tracker, mock_writer
+    ):
+        """A checkout-create exchange has Context only on the request side
+        (the platform tells the merchant the buyer's intent / locale /
+        currency); the response carries the resolved checkout state.
+        Both must end up on the same row."""
+        request_body = {
+            "context": {
+                "intent": "buy a birthday gift",
+                "language": "en-US",
+                "currency": "USD",
+                "eligibility": ["dev.example.loyalty_member"],
+            },
+            "line_items": [{"item": {"id": "sku_rose"}, "quantity": 1}],
+        }
+        response_body = {
+            "id": "chk_123",
+            "status": "ready_for_complete",
+            "currency": "USD",
+        }
+        event = await tracker.record_http(
+            method="POST",
+            url="https://merchant.example.com/checkout-sessions",
+            status_code=201,
+            request_body=request_body,
+            response_body=response_body,
+        )
+
+        # Response-only fields land.
+        assert event.event_type == "checkout_session_created"
+        assert event.checkout_session_id == "chk_123"
+        assert event.checkout_status == "ready_for_complete"
+        assert event.currency == "USD"
+        # Request-only fields survive the response-side extraction.
+        assert event.context_intent == "buy a birthday gift"
+        assert event.context_language == "en-US"
+        assert event.context_currency == "USD"
+        assert event.context_eligibility_json is not None
+        assert "dev.example.loyalty_member" in event.context_eligibility_json
+
+    async def test_response_body_overlays_request_body_on_conflict(
+        self, tracker, mock_writer
+    ):
+        """When request and response both carry the same field, response
+        wins — it's the merchant-confirmed state. Pinned so the merge
+        order doesn't drift."""
+        # Request says draft USD; response says authoritative EUR.
+        request_body = {"currency": "USD", "context": {"intent": "browsing"}}
+        response_body = {
+            "id": "chk_456",
+            "status": "incomplete",
+            "currency": "EUR",
+        }
+        event = await tracker.record_http(
+            method="POST",
+            url="https://merchant.example.com/checkout-sessions",
+            status_code=201,
+            request_body=request_body,
+            response_body=response_body,
+        )
+        # Response wins on the conflicting field.
+        assert event.currency == "EUR"
+        # Request-only field is preserved.
+        assert event.context_intent == "browsing"
 
 
 class TestPIIRedaction:

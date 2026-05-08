@@ -525,6 +525,106 @@ class TestExtract:
         applied = json.loads(fields["discount_applied_json"])
         assert applied[0]["code"] == "SAVE10"
 
+    # --- Context (request-body Context object) ---
+
+    def test_extract_context_on_checkout_create(self):
+        """Checkout-create requests carry a top-level `context` object
+        with intent, language, currency, and eligibility per
+        source/schemas/shopping/types/context.json."""
+        body = {
+            "context": {
+                "intent": "buy a birthday gift for mom",
+                "language": "en-US",
+                "currency": "USD",
+                "eligibility": [
+                    "dev.example.loyalty_member",
+                    "dev.example.first_time_buyer",
+                ],
+            },
+            "line_items": [
+                {"item": {"id": "sku_rose"}, "quantity": 1},
+            ],
+        }
+        fields = UCPResponseParser.extract(body)
+        assert fields["context_intent"] == "buy a birthday gift for mom"
+        assert fields["context_language"] == "en-US"
+        assert fields["context_currency"] == "USD"
+        assert "dev.example.loyalty_member" in fields["context_eligibility_json"]
+        assert "dev.example.first_time_buyer" in fields["context_eligibility_json"]
+
+    def test_extract_context_on_cart_create(self):
+        """Cart-create requests carry the same Context object shape."""
+        body = {
+            "context": {
+                "intent": "stock up for the week",
+                "language": "fr-CA",
+                "currency": "CAD",
+            },
+            "line_items": [{"item": {"id": "sku_milk"}, "quantity": 2}],
+        }
+        fields = UCPResponseParser.extract(body)
+        assert fields["context_intent"] == "stock up for the week"
+        assert fields["context_language"] == "fr-CA"
+        assert fields["context_currency"] == "CAD"
+        # No eligibility on this body — the column should be absent.
+        assert "context_eligibility_json" not in fields
+
+    def test_extract_context_on_catalog_search(self):
+        """Catalog-search requests use the same Context shape; intent
+        in particular is the high-value signal for relevance analytics."""
+        body = {
+            "context": {
+                "intent": "vegan running shoes under 100 dollars",
+                "language": "en",
+                "currency": "USD",
+            },
+            "query": "running shoes",
+        }
+        fields = UCPResponseParser.extract(body)
+        assert fields["context_intent"] == "vegan running shoes under 100 dollars"
+        assert fields["context_language"] == "en"
+        assert fields["context_currency"] == "USD"
+
+    def test_extract_context_partial(self):
+        """A context object may carry only a subset of properties; we
+        only populate the columns that are present in the source body."""
+        body = {"context": {"language": "ja-JP"}}
+        fields = UCPResponseParser.extract(body)
+        assert fields["context_language"] == "ja-JP"
+        assert "context_intent" not in fields
+        assert "context_currency" not in fields
+        assert "context_eligibility_json" not in fields
+
+    def test_extract_context_address_fields_not_captured_yet(self):
+        """Address fields on context (address_country, address_region,
+        postal_code) are PII and intentionally deferred to a later slice
+        with the redaction policy. This test pins that current behavior
+        so no one accidentally surfaces them as scalar columns without
+        also wiring redaction."""
+        body = {
+            "context": {
+                "intent": "ship to office",
+                "address_country": "US",
+                "address_region": "CA",
+                "postal_code": "94043",
+            },
+        }
+        fields = UCPResponseParser.extract(body)
+        assert fields["context_intent"] == "ship to office"
+        assert "context_address_country" not in fields
+        assert "context_address_region" not in fields
+        assert "context_postal_code" not in fields
+
+    def test_extract_no_context_object(self):
+        """Bodies without a context object don't populate any of the
+        new columns."""
+        body = {"id": "chk_123", "status": "ready_for_complete"}
+        fields = UCPResponseParser.extract(body)
+        assert "context_intent" not in fields
+        assert "context_language" not in fields
+        assert "context_currency" not in fields
+        assert "context_eligibility_json" not in fields
+
     def test_extract_order_confirmation_in_checkout(self):
         """Spec: checkout.order is a nested object with id and permalink_url."""
         body = {
