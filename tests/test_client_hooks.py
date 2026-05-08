@@ -180,3 +180,49 @@ class TestUCPClientEventHookPathFiltering:
         )
         await hook(resp)
         mock_tracker.record_http.assert_not_awaited()
+
+    async def test_captures_oauth2_token(self, hook, mock_tracker):
+        # Token endpoint — start of identity-linking analytics on the
+        # client side.
+        resp = _make_response(
+            url="https://shop.example.com/oauth2/token",
+            method="POST",
+            status_code=200,
+            json_body={"access_token": "redacted", "token_type": "Bearer"},
+        )
+        await hook(resp)
+        mock_tracker.record_http.assert_awaited_once()
+
+    async def test_captures_oauth_authorization_server_metadata(
+        self, hook, mock_tracker
+    ):
+        # RFC 8414 metadata discovery.
+        resp = _make_response(
+            url="https://shop.example.com/.well-known/oauth-authorization-server",
+            method="GET",
+            status_code=200,
+            json_body={"issuer": "https://shop.example.com"},
+        )
+        await hook(resp)
+        mock_tracker.record_http.assert_awaited_once()
+
+    async def test_captures_mounted_oauth2_authorize(self, hook, mock_tracker):
+        resp = _make_response(
+            url="https://shop.example.com/api/v1/oauth2/authorize",
+            method="GET",
+            status_code=302,
+        )
+        await hook(resp)
+        mock_tracker.record_http.assert_awaited_once()
+
+    async def test_skips_oauth2_proxy_lookalike(self, hook, mock_tracker):
+        # `/oauth2-proxy` is real infra; segment-aware filter must
+        # reject it.
+        resp = _make_response(
+            url="https://shop.example.com/api/oauth2-proxy/start",
+            method="GET",
+            status_code=200,
+            json_body={},
+        )
+        await hook(resp)
+        mock_tracker.record_http.assert_not_awaited()
