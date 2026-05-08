@@ -344,6 +344,116 @@ class TestRecordHttp:
         assert event.request_signature_keyid == "upper-K"
         assert event.response_signature_keyid == "mixed-K"
 
+    # --- Standard Webhooks metadata (UCP order.md) ---
+
+    async def test_webhook_headers_extracted_from_request_side(
+        self, tracker, mock_writer
+    ):
+        """Inbound webhooks carry Webhook-Id and Webhook-Timestamp on
+        the request. Both columns must land — these are the join keys
+        for de-duping deliveries and correlating to merchant outbound
+        events."""
+        event = await tracker.record_http(
+            method="POST",
+            url="https://platform.example.com/webhooks/partners/p1/events/order",
+            status_code=200,
+            request_body={
+                "id": "order_abc",
+                "checkout_id": "chk_xyz",
+                "status": "delivered",
+            },
+            request_headers={
+                "Webhook-Id": "evt_2026_05_08_001",
+                "Webhook-Timestamp": "1767225600",  # 2026-01-01T00:00:00Z
+            },
+        )
+        assert event.webhook_id == "evt_2026_05_08_001"
+        assert event.webhook_timestamp == "2026-01-01T00:00:00+00:00"
+        # Existing webhook extraction still works.
+        assert event.event_type == "order_delivered"
+        assert event.order_id == "order_abc"
+
+    async def test_webhook_timestamp_garbage_does_not_crash_row(
+        self, tracker, mock_writer
+    ):
+        """A malformed Webhook-Timestamp from one bad sender must not
+        take down the whole row — webhook_timestamp lands as None and
+        the rest of the event still records."""
+        event = await tracker.record_http(
+            method="POST",
+            url="https://platform.example.com/webhooks/partners/p1/events/order",
+            status_code=200,
+            request_headers={
+                "Webhook-Id": "evt_xyz",
+                "Webhook-Timestamp": "not-a-unix-timestamp",
+            },
+            request_body={
+                "id": "order_xyz",
+                "checkout_id": "chk_xyz",
+                "status": "delivered",
+            },
+        )
+        assert event.webhook_id == "evt_xyz"
+        assert event.webhook_timestamp is None
+        assert event.event_type == "order_delivered"
+
+    async def test_non_webhook_traffic_has_no_webhook_metadata(
+        self, tracker, mock_writer
+    ):
+        """Regular checkout traffic doesn't carry Webhook-* headers,
+        so the columns stay None — distinct from a webhook delivery."""
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            request_headers={"content-type": "application/json"},
+            response_headers={"content-type": "application/json"},
+        )
+        assert event.webhook_id is None
+        assert event.webhook_timestamp is None
+
+    async def test_webhook_headers_rejected_on_non_webhook_path(
+        self, tracker, mock_writer
+    ):
+        """Per UCP order.md, Webhook-Id / Webhook-Timestamp belong to
+        the Order Event Webhook flow only. A buggy or malicious sender
+        could stamp these headers onto a regular checkout / cart /
+        catalog request; we must NOT capture them there — webhook
+        metadata on a checkout row would corrupt de-dup / lag /
+        correlation queries."""
+        event = await tracker.record_http(
+            method="POST",
+            url="https://merchant.example.com/checkout-sessions",
+            status_code=201,
+            request_headers={
+                "Webhook-Id": "evt_definitely_not_a_webhook",
+                "Webhook-Timestamp": "1767225600",
+            },
+            response_body={"id": "chk_xyz", "status": "ready_for_complete"},
+        )
+        # Path-scoped: not a webhook, so headers are dropped.
+        assert event.event_type == "checkout_session_created"
+        assert event.webhook_id is None
+        assert event.webhook_timestamp is None
+
+    async def test_webhook_lookup_is_case_insensitive(self, tracker, mock_writer):
+        event = await tracker.record_http(
+            method="POST",
+            url="https://platform.example.com/webhooks/partners/p1/events/order",
+            status_code=200,
+            request_headers={
+                "WEBHOOK-ID": "evt_upper",
+                "wEbHoOk-TiMeStAmP": "1767225600",
+            },
+            request_body={
+                "id": "order_a",
+                "checkout_id": "chk_a",
+                "status": "delivered",
+            },
+        )
+        assert event.webhook_id == "evt_upper"
+        assert event.webhook_timestamp == "2026-01-01T00:00:00+00:00"
+
     async def test_response_body_overlays_request_body_on_conflict(
         self, tracker, mock_writer
     ):
