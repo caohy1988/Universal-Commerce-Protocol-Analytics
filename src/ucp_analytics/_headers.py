@@ -18,6 +18,20 @@ from typing import Mapping, Optional
 # "is this row signed and by what key", so we extract the first match.
 _SIGNATURE_INPUT_KEYID_RE = re.compile(r';\s*keyid\s*=\s*"([^"]+)"')
 
+# UCP `checkout-rest.md` documents UCP-Agent as an RFC 8941 Structured
+# Field Dictionary with a `profile` member that is a quoted-string URI:
+# `UCP-Agent: profile="https://platform.example/profile"`. We only need
+# that one member, so a regex-anchored extraction beats pulling in a
+# full RFC 8941 parser.
+#
+# Match only at the start of the header or after a `,` — RFC 8941
+# Dictionary *members* are comma-separated, while `;` separates
+# *parameters* attached to the preceding member. Allowing `;profile=...`
+# would misattribute attacker-controlled parameter values, e.g.
+# `foo="bar";profile="https://attacker.example"` would otherwise yield
+# `https://attacker.example` as a valid profile URI.
+_UCP_AGENT_PROFILE_RE = re.compile(r'(?:^|,)\s*profile\s*=\s*"([^"]+)"')
+
 
 def lookup_header(headers: Optional[Mapping[str, str]], name: str) -> Optional[str]:
     """Case-insensitive header lookup.
@@ -90,6 +104,34 @@ def webhook_timestamp_iso(
         return datetime.fromtimestamp(seconds, tz=timezone.utc).isoformat()
     except (OverflowError, OSError, ValueError):
         return None
+
+
+def ucp_agent_profile_url(
+    headers: Optional[Mapping[str, str]],
+) -> Optional[str]:
+    """Parse the `profile` member out of a UCP-Agent header.
+
+    Per UCP `checkout-rest.md`, UCP-Agent is an RFC 8941 Structured Field
+    Dictionary whose `profile` member is a quoted-string URI:
+
+        UCP-Agent: profile="https://platform.example/profile"
+
+    On a platform → business request, this is the platform's profile;
+    on a business → platform webhook, it's the business's profile. The
+    column name `ucp_agent_profile_url` is intentionally direction-
+    neutral so a single column captures both cases — the existing
+    `platform_profile_url` field is misleading on the webhook flow and
+    is kept only for backwards compatibility.
+
+    Returns the profile URI string if a UCP-Agent header is present and
+    a `profile="..."` member can be parsed from it; otherwise None. We
+    don't validate the URI itself — analytics records what was sent.
+    """
+    raw = lookup_header(headers, "ucp-agent")
+    if not raw:
+        return None
+    match = _UCP_AGENT_PROFILE_RE.search(raw)
+    return match.group(1) if match else None
 
 
 def signature_keyid(headers: Optional[Mapping[str, str]]) -> Optional[str]:

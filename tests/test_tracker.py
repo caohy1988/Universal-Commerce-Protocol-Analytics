@@ -412,6 +412,75 @@ class TestRecordHttp:
         assert event.webhook_id is None
         assert event.webhook_timestamp is None
 
+    async def test_ucp_agent_profile_url_parsed_from_header(self, tracker, mock_writer):
+        """UCP-Agent: profile=\"...\" is an RFC 8941 Dictionary; we need
+        the parsed URI in `ucp_agent_profile_url` for clean joins, not
+        the raw structured-field string. The legacy
+        `platform_profile_url` field still carries the raw value for
+        backwards compatibility."""
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            request_headers={
+                "ucp-agent": 'profile="https://platform.example/profile"',
+            },
+        )
+        assert event.ucp_agent_profile_url == "https://platform.example/profile"
+        # Backwards compat: legacy column still populated.
+        assert "platform.example" in event.platform_profile_url
+
+    async def test_ucp_agent_profile_url_works_on_webhook(self, tracker, mock_writer):
+        """On business → platform webhooks the UCP-Agent value carries
+        the *business's* profile, not the platform's. The neutral
+        `ucp_agent_profile_url` column captures both directions
+        cleanly; pinned because the legacy field name is misleading
+        in this direction."""
+        event = await tracker.record_http(
+            method="POST",
+            url="https://platform.example/webhooks/partners/p1/events/order",
+            status_code=200,
+            request_headers={
+                "UCP-Agent": 'profile="https://merchant.example/profile"',
+                "Webhook-Id": "evt_1",
+                "Webhook-Timestamp": "1767225600",
+            },
+            request_body={
+                "id": "order_a",
+                "checkout_id": "chk_a",
+                "status": "delivered",
+            },
+        )
+        assert event.ucp_agent_profile_url == "https://merchant.example/profile"
+
+    async def test_ucp_agent_profile_url_absent_records_none(
+        self, tracker, mock_writer
+    ):
+        """Traffic without UCP-Agent records None — distinct from a
+        sender that included the header but didn't include a profile
+        member."""
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            request_headers={"content-type": "application/json"},
+        )
+        assert event.ucp_agent_profile_url is None
+
+    async def test_ucp_agent_profile_url_malformed_records_none(
+        self, tracker, mock_writer
+    ):
+        """Header present but missing the `profile` member → None;
+        legacy column still carries the raw header for forensics."""
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            request_headers={"ucp-agent": 'version="2026-04-08"'},
+        )
+        assert event.ucp_agent_profile_url is None
+        assert event.platform_profile_url == 'version="2026-04-08"'
+
     async def test_webhook_headers_rejected_on_non_webhook_path(
         self, tracker, mock_writer
     ):
