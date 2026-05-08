@@ -140,6 +140,14 @@ class UCPEvent:
     request_signature_keyid: Optional[str] = None
     response_signature_keyid: Optional[str] = None
 
+    # --- Standard Webhooks metadata (UCP order.md) ---
+    # Captured from `Webhook-Id` and `Webhook-Timestamp` request headers
+    # on inbound webhook deliveries. webhook_timestamp is parsed from
+    # Unix seconds into an ISO 8601 UTC string for BQ TIMESTAMP storage
+    # — the spec specifies Unix seconds, not ISO 8601.
+    webhook_id: Optional[str] = None
+    webhook_timestamp: Optional[str] = None
+
     # --- financial (minor units / cents, spec total types) ---
     currency: Optional[str] = None
     items_discount_amount: Optional[int] = None
