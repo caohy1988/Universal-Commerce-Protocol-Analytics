@@ -202,6 +202,148 @@ class TestRecordHttp:
         assert event.context_eligibility_json is not None
         assert "dev.example.loyalty_member" in event.context_eligibility_json
 
+    # --- HTTP message signing (RFC 9421 / UCP signatures.md) ---
+
+    async def test_unsigned_exchange_marks_both_directions_false(
+        self, tracker, mock_writer
+    ):
+        """An exchange with observed-but-unsigned headers records
+        request_signed=False / response_signed=False — distinct from a
+        row where headers were never observed at all."""
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            request_headers={"content-type": "application/json"},
+            response_headers={"content-type": "application/json"},
+        )
+        assert event.request_signed is False
+        assert event.response_signed is False
+        assert event.request_signature_keyid is None
+        assert event.response_signature_keyid is None
+
+    async def test_unobserved_headers_record_none_not_false(self, tracker, mock_writer):
+        """Direct callers that don't pass headers at all must record
+        request_signed / response_signed as None (unknown), not False
+        (observed unsigned). Without this the "% signed traffic" KPI
+        is biased downward by every direct-API row."""
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            # request_headers and response_headers both omitted entirely
+        )
+        assert event.request_signed is None
+        assert event.response_signed is None
+        assert event.request_signature_keyid is None
+        assert event.response_signature_keyid is None
+
+    async def test_request_side_signing_extracts_keyid(self, tracker, mock_writer):
+        """Request signed by the platform: extract request_signed=True and
+        the keyid for joining against /.well-known/ucp signing_keys[].
+        Both Signature-Input AND Signature must be present together
+        per UCP signatures.md."""
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            request_headers={
+                "Signature-Input": (
+                    'sig1=("@method" "@path" "host");'
+                    'keyid="platform-key-1";created=1770000000'
+                ),
+                "Signature": "sig1=:abc==:",
+            },
+            response_headers={"content-type": "application/json"},
+        )
+        assert event.request_signed is True
+        assert event.request_signature_keyid == "platform-key-1"
+        assert event.response_signed is False
+        assert event.response_signature_keyid is None
+
+    async def test_half_signed_request_is_not_counted_as_signed(
+        self, tracker, mock_writer
+    ):
+        """Signature-Input present but Signature missing → malformed
+        half-signature. Must record request_signed=False so the KPI
+        doesn't inflate on incomplete senders. We still parse the keyid
+        for forensic purposes — useful when debugging which platforms
+        are sending half-signed traffic."""
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            request_headers={
+                # Metadata header only, no actual signature value.
+                "Signature-Input": 'sig1=();keyid="platform-key-1"',
+            },
+            response_headers={"content-type": "application/json"},
+        )
+        assert event.request_signed is False
+        assert event.request_signature_keyid == "platform-key-1"
+
+    async def test_response_side_signing_extracts_keyid(self, tracker, mock_writer):
+        """Response signed by the merchant: extract response_signed=True
+        independently from request side, since request and response can
+        be signed by different parties."""
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            request_headers={"content-type": "application/json"},
+            response_headers={
+                "signature-input": 'sig1=();keyid="merchant-key-A"',
+                "signature": "sig1=:def==:",
+            },
+        )
+        assert event.request_signed is False
+        assert event.response_signed is True
+        assert event.response_signature_keyid == "merchant-key-A"
+        assert event.request_signature_keyid is None
+
+    async def test_both_sides_signed_with_distinct_keyids(self, tracker, mock_writer):
+        """Platform-signed request, merchant-signed response. Distinct
+        keyids land in their respective columns — pinned because
+        conflating them was an explicit issue #8 acceptance concern."""
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            request_headers={
+                "Signature-Input": 'sig1=();keyid="platform-K"',
+                "Signature": "sig1=:abc==:",
+            },
+            response_headers={
+                "Signature-Input": 'sig1=();keyid="merchant-K"',
+                "Signature": "sig1=:def==:",
+            },
+        )
+        assert event.request_signed is True
+        assert event.response_signed is True
+        assert event.request_signature_keyid == "platform-K"
+        assert event.response_signature_keyid == "merchant-K"
+
+    async def test_signing_lookup_is_case_insensitive(self, tracker, mock_writer):
+        """Real middleware hands the headers off in either casing
+        depending on the framework. Pin case-insensitive lookup."""
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            request_headers={
+                "SIGNATURE-INPUT": 'sig1=();keyid="upper-K"',
+                "SIGNATURE": "sig1=:abc==:",
+            },
+            response_headers={
+                "sIgNaTuRe-InPuT": 'sig1=();keyid="mixed-K"',
+                "sIgNaTuRe": "sig1=:def==:",
+            },
+        )
+        assert event.request_signed is True
+        assert event.response_signed is True
+        assert event.request_signature_keyid == "upper-K"
+        assert event.response_signature_keyid == "mixed-K"
+
     async def test_response_body_overlays_request_body_on_conflict(
         self, tracker, mock_writer
     ):

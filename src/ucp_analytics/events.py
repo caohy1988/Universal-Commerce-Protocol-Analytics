@@ -127,6 +127,19 @@ class UCPEvent:
     context_currency: Optional[str] = None
     context_eligibility_json: Optional[str] = None
 
+    # --- HTTP message signing (RFC 9421 / UCP signatures.md) ---
+    # request_signed / response_signed flag whether a Signature-Input
+    # header was present on the corresponding side; the keyid columns
+    # carry the first parsable `keyid` parameter so dashboards can
+    # join against the JWK published at `/.well-known/ucp`'s
+    # `signing_keys[]`. Algorithm columns are deferred — the spec
+    # derives algorithm from the JWK `crv`, not from the wire header,
+    # and resolving that requires JWK lookup that lands later.
+    request_signed: Optional[bool] = None
+    response_signed: Optional[bool] = None
+    request_signature_keyid: Optional[str] = None
+    response_signature_keyid: Optional[str] = None
+
     # --- financial (minor units / cents, spec total types) ---
     currency: Optional[str] = None
     items_discount_amount: Optional[int] = None

@@ -102,6 +102,7 @@ class UCPClientEventHook:
         # Record
         try:
             headers = dict(request.headers)
+            response_headers = dict(response.headers)
             await self.tracker.record_http(
                 method=request.method,
                 url=str(request.url),
@@ -111,6 +112,7 @@ class UCPClientEventHook:
                 response_body=response_body,
                 latency_ms=latency_ms,
                 request_headers=headers,
+                response_headers=response_headers,
             )
         except Exception:
             logger.exception("UCP client analytics recording failed")

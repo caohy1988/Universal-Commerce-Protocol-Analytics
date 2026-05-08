@@ -43,6 +43,11 @@ BQ_SCHEMA_FIELDS = [
     ("context_language", "STRING", "NULLABLE"),
     ("context_currency", "STRING", "NULLABLE"),
     ("context_eligibility_json", "JSON", "NULLABLE"),
+    # HTTP message signing (RFC 9421 / UCP signatures.md)
+    ("request_signed", "BOOL", "NULLABLE"),
+    ("response_signed", "BOOL", "NULLABLE"),
+    ("request_signature_keyid", "STRING", "NULLABLE"),
+    ("response_signature_keyid", "STRING", "NULLABLE"),
     # financial (spec total types: items_discount, subtotal, discount,
     # fulfillment, tax, fee, total)
     ("currency", "STRING", "NULLABLE"),
