@@ -27,13 +27,18 @@ def _make_response(
     status_code: int = 201,
     json_body: dict | None = None,
     request_content: bytes = b"",
+    request_headers: dict | None = None,
+    response_headers: dict | None = None,
 ) -> httpx.Response:
     """Build a mock httpx.Response."""
-    request = httpx.Request(method, url, content=request_content)
+    request = httpx.Request(
+        method, url, content=request_content, headers=request_headers or {}
+    )
     response = httpx.Response(
         status_code=status_code,
         request=request,
         json=json_body,
+        headers=response_headers or {},
     )
     response._elapsed = timedelta(milliseconds=42)
     return response
@@ -214,6 +219,30 @@ class TestUCPClientEventHookPathFiltering:
         )
         await hook(resp)
         mock_tracker.record_http.assert_awaited_once()
+
+    async def test_passes_response_headers_to_tracker(self, hook, mock_tracker):
+        """The hook must hand response headers off to record_http so the
+        signing-header columns can land. Pin this — without it a
+        merchant-signed response is invisible to analytics."""
+        resp = _make_response(
+            url="https://shop.example.com/checkout-sessions",
+            method="POST",
+            status_code=201,
+            json_body={"id": "chk_123"},
+            request_headers={"Signature-Input": 'sig1=();keyid="platform-K"'},
+            response_headers={"signature-input": 'sig1=();keyid="merchant-K"'},
+        )
+        await hook(resp)
+        mock_tracker.record_http.assert_awaited_once()
+        call_kwargs = mock_tracker.record_http.call_args.kwargs
+        # Both directions arrive at the tracker.
+        assert "Signature-Input" in call_kwargs["request_headers"] or (
+            "signature-input" in call_kwargs["request_headers"]
+        )
+        assert call_kwargs["response_headers"] is not None
+        assert "signature-input" in call_kwargs["response_headers"] or (
+            "Signature-Input" in call_kwargs["response_headers"]
+        )
 
     async def test_skips_oauth2_proxy_lookalike(self, hook, mock_tracker):
         # `/oauth2-proxy` is real infra; segment-aware filter must

@@ -116,6 +116,7 @@ class UCPAnalyticsMiddleware(BaseHTTPMiddleware):
         # Tasks are tracked on the tracker so tracker.close() drains them.
         try:
             headers = dict(request.headers)
+            response_headers = dict(response.headers)
             task = asyncio.create_task(
                 self.tracker.record_http(
                     method=request.method,
@@ -126,6 +127,7 @@ class UCPAnalyticsMiddleware(BaseHTTPMiddleware):
                     response_body=response_body,
                     latency_ms=latency_ms,
                     request_headers=headers,
+                    response_headers=response_headers,
                 )
             )
             self.tracker.register_pending_task(task)

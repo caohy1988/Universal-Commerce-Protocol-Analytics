@@ -12,6 +12,7 @@ import logging
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
+from ucp_analytics._headers import is_signed, signature_keyid
 from ucp_analytics.events import UCPEvent
 from ucp_analytics.parser import UCPResponseParser
 from ucp_analytics.writer import AsyncBigQueryWriter
@@ -101,6 +102,7 @@ class UCPAnalyticsTracker:
         response_body: Optional[dict] = None,
         latency_ms: Optional[float] = None,
         request_headers: Optional[Dict[str, str]] = None,
+        response_headers: Optional[Dict[str, str]] = None,
     ) -> UCPEvent:
         """Record a single UCP HTTP request/response pair.
 
@@ -137,6 +139,25 @@ class UCPAnalyticsTracker:
             platform_profile_url=headers.get("ucp-agent", ""),
             idempotency_key=headers.get("idempotency-key", ""),
             request_id=headers.get("request-id", ""),
+            # HTTP message signing per RFC 9421. is_signed / signature_keyid
+            # do their own case-insensitive lookup, so we don't need to
+            # pre-normalize the header dict here.
+            #
+            # Distinguish "headers never observed" (None) from "headers
+            # observed and unsigned" (False). Middleware and HTTPX hook
+            # always pass a dict (possibly empty), so genuinely unsigned
+            # traffic records False; direct callers that don't pass the
+            # corresponding side record None — without this the
+            # "% signed traffic" KPI would treat every direct-API row as
+            # observed unsigned.
+            request_signed=(
+                is_signed(request_headers) if request_headers is not None else None
+            ),
+            response_signed=(
+                is_signed(response_headers) if response_headers is not None else None
+            ),
+            request_signature_keyid=signature_keyid(request_headers),
+            response_signature_keyid=signature_keyid(response_headers),
         )
 
         # Extract UCP fields from both request and response bodies.
