@@ -59,6 +59,22 @@ class TestMiddlewareDetectorMatchesMountedPaths:
         assert _matches("/ucp/v1/identity")
         assert _matches("/api/v2/identity/callback")
 
+    def test_mounted_oauth2_matches(self):
+        # OAuth flow endpoints — segment-aware match works even when
+        # the base path is something like /api/v1.
+        assert _matches("/oauth2/authorize")
+        assert _matches("/oauth2/token")
+        assert _matches("/oauth2/revoke")
+        assert _matches("/oauth2/jwks")
+        assert _matches("/api/v1/oauth2/token")
+        assert _matches("/merchant/api/ucp/v1/oauth2/authorize")
+
+    def test_oauth_metadata_discovery_matches(self):
+        assert _matches("/.well-known/oauth-authorization-server")
+        assert _matches("/.well-known/openid-configuration")
+        assert _matches("/.well-known/oauth-protected-resource")
+        assert _matches("/api/v1/.well-known/oauth-authorization-server")
+
     def test_unrelated_paths_do_not_match(self):
         assert not _matches("/healthz")
         assert not _matches("/api/users")
@@ -89,6 +105,12 @@ class TestMiddlewareDetectorRejectsNearMisses:
 
     def test_checkout_sessions_does_not_match_lookalike(self):
         assert not _matches("/api/checkout-sessions-archive")
+
+    def test_oauth2_does_not_match_oauth2_proxy(self):
+        # `/oauth2-proxy` is a real piece of infra (oauth2-proxy
+        # reverse proxy); the marker must not catch it.
+        assert not _matches("/api/oauth2-proxy/start")
+        assert not _matches("/oauth2-debug")
 
 
 # Direct unit coverage of path_matches_marker lives in tests/test_path_match.py
