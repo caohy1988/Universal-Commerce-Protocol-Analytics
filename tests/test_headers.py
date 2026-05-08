@@ -11,6 +11,7 @@ from ucp_analytics._headers import (
     is_signed,
     lookup_header,
     signature_keyid,
+    ucp_agent_profile_url,
     webhook_id,
     webhook_timestamp_iso,
 )
@@ -213,3 +214,110 @@ class TestWebhookTimestampIso:
             webhook_timestamp_iso({"Webhook-Timestamp": "999999999999999999999"})
             is None
         )
+
+
+class TestUcpAgentProfileUrl:
+    """UCP-Agent is an RFC 8941 Structured Field Dictionary with a
+    `profile` member that's a quoted-string URI per checkout-rest.md."""
+
+    def test_canonical_form(self):
+        # The example from checkout-rest.md.
+        assert (
+            ucp_agent_profile_url(
+                {"UCP-Agent": 'profile="https://platform.example/profile"'}
+            )
+            == "https://platform.example/profile"
+        )
+
+    def test_lowercase_header_name(self):
+        assert (
+            ucp_agent_profile_url(
+                {"ucp-agent": 'profile="https://merchant.example/profile"'}
+            )
+            == "https://merchant.example/profile"
+        )
+
+    def test_uppercase_header_name(self):
+        assert (
+            ucp_agent_profile_url({"UCP-AGENT": 'profile="https://x.example/y"'})
+            == "https://x.example/y"
+        )
+
+    def test_profile_with_other_dict_members(self):
+        # RFC 8941 Dictionary members are comma-separated. `;` introduces
+        # *parameters* on the preceding member, not new members.
+        assert (
+            ucp_agent_profile_url(
+                {
+                    "UCP-Agent": (
+                        'profile="https://platform.example/profile",'
+                        ' version="2026-04-08"'
+                    )
+                }
+            )
+            == "https://platform.example/profile"
+        )
+
+    def test_profile_after_other_member(self):
+        # Order shouldn't matter; the `profile` member can appear after
+        # an unrelated dictionary member, separated by a comma.
+        assert (
+            ucp_agent_profile_url(
+                {
+                    "UCP-Agent": (
+                        'version="2026-04-08",'
+                        ' profile="https://merchant.example/profile"'
+                    )
+                }
+            )
+            == "https://merchant.example/profile"
+        )
+
+    def test_profile_as_parameter_on_other_member_is_not_extracted(self):
+        # In RFC 8941 syntax, `;profile="..."` is a parameter attached to
+        # the preceding member, not a top-level member. A malformed /
+        # malicious sender could otherwise smuggle an attacker-controlled
+        # URI into our column via something like
+        #   foo="bar";profile="https://attacker.example"
+        # We must NOT extract this as a valid profile URI.
+        assert (
+            ucp_agent_profile_url(
+                {"UCP-Agent": ('foo="bar";profile="https://attacker.example"')}
+            )
+            is None
+        )
+        assert (
+            ucp_agent_profile_url(
+                {
+                    "UCP-Agent": (
+                        'version="2026-04-08";profile="https://attacker.example"'
+                    )
+                }
+            )
+            is None
+        )
+
+    def test_no_profile_member(self):
+        # Header present but missing the `profile` member (malformed,
+        # non-UCP, etc.) — return None rather than misattributing.
+        assert ucp_agent_profile_url({"UCP-Agent": 'version="2026-04-08"'}) is None
+
+    def test_absent(self):
+        assert ucp_agent_profile_url({"content-type": "application/json"}) is None
+
+    def test_none(self):
+        assert ucp_agent_profile_url(None) is None
+
+    def test_empty_value(self):
+        assert ucp_agent_profile_url({"UCP-Agent": ""}) is None
+
+    def test_empty_profile_value_returns_none(self):
+        # `profile=""` matches the regex but yields an empty URI which
+        # isn't useful — but we don't currently special-case this; the
+        # empty string lands in the column. Pin current behavior.
+        assert ucp_agent_profile_url({"UCP-Agent": 'profile=""'}) is None
+
+    def test_url_with_path_and_query(self):
+        # Real profile URIs have paths and sometimes query strings.
+        url = "https://platform.example/.well-known/ucp?v=2026-04-08"
+        assert ucp_agent_profile_url({"UCP-Agent": f'profile="{url}"'}) == url

@@ -51,6 +51,8 @@ BQ_SCHEMA_FIELDS = [
     # Standard Webhooks metadata (UCP order.md)
     ("webhook_id", "STRING", "NULLABLE"),
     ("webhook_timestamp", "TIMESTAMP", "NULLABLE"),
+    # UCP-Agent profile URI (parsed; supersedes platform_profile_url)
+    ("ucp_agent_profile_url", "STRING", "NULLABLE"),
     # financial (spec total types: items_discount, subtotal, discount,
     # fulfillment, tax, fee, total)
     ("currency", "STRING", "NULLABLE"),
