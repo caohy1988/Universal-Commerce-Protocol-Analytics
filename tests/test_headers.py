@@ -7,7 +7,13 @@ extra isn't installed.
 
 from __future__ import annotations
 
-from ucp_analytics._headers import is_signed, lookup_header, signature_keyid
+from ucp_analytics._headers import (
+    is_signed,
+    lookup_header,
+    signature_keyid,
+    webhook_id,
+    webhook_timestamp_iso,
+)
 
 
 class TestLookupHeader:
@@ -131,3 +137,79 @@ class TestSignatureKeyid:
         # `keyid` must be its own structured-field parameter; a header
         # with only other parameters (no keyid) returns None.
         assert signature_keyid({"Signature-Input": 'sig1=();foo="bar"'}) is None
+
+
+class TestWebhookId:
+    def test_present(self):
+        assert webhook_id({"Webhook-Id": "evt_abc123"}) == "evt_abc123"
+
+    def test_lowercase(self):
+        assert webhook_id({"webhook-id": "evt_xyz"}) == "evt_xyz"
+
+    def test_strips_whitespace(self):
+        assert webhook_id({"Webhook-Id": "  evt_abc  "}) == "evt_abc"
+
+    def test_empty_value_returns_none(self):
+        assert webhook_id({"Webhook-Id": ""}) is None
+        assert webhook_id({"Webhook-Id": "   "}) is None
+
+    def test_absent(self):
+        assert webhook_id({"content-type": "application/json"}) is None
+
+    def test_none(self):
+        assert webhook_id(None) is None
+
+
+class TestWebhookTimestampIso:
+    """UCP order.md documents Webhook-Timestamp as Unix seconds, not
+    ISO 8601. Parsing it as ISO 8601 (the obvious-but-wrong default)
+    would silently drop the column on every webhook."""
+
+    def test_unix_seconds_parses_to_iso_utc(self):
+        # 2026-01-01T00:00:00Z = 1767225600
+        result = webhook_timestamp_iso({"Webhook-Timestamp": "1767225600"})
+        assert result == "2026-01-01T00:00:00+00:00"
+
+    def test_lowercase_header_name(self):
+        assert webhook_timestamp_iso({"webhook-timestamp": "1770000000"}) is not None
+
+    def test_strips_whitespace(self):
+        assert (
+            webhook_timestamp_iso({"Webhook-Timestamp": "  1767225600  "})
+            == "2026-01-01T00:00:00+00:00"
+        )
+
+    def test_iso_input_not_misparsed(self):
+        # An ISO 8601 string in this header is malformed per spec.
+        # Don't raise — return None so the row still flows.
+        assert (
+            webhook_timestamp_iso({"Webhook-Timestamp": "2026-01-01T00:00:00Z"}) is None
+        )
+
+    def test_garbage_returns_none(self):
+        assert webhook_timestamp_iso({"Webhook-Timestamp": "not-a-number"}) is None
+
+    def test_empty_value(self):
+        assert webhook_timestamp_iso({"Webhook-Timestamp": ""}) is None
+        assert webhook_timestamp_iso({"Webhook-Timestamp": "   "}) is None
+
+    def test_absent(self):
+        assert webhook_timestamp_iso({"content-type": "application/json"}) is None
+
+    def test_none(self):
+        assert webhook_timestamp_iso(None) is None
+
+    def test_negative_unix_seconds_pre_epoch(self):
+        # Pre-1970 timestamps are unusual but technically valid Unix
+        # seconds. Parse without raising.
+        result = webhook_timestamp_iso({"Webhook-Timestamp": "-86400"})
+        assert result == "1969-12-31T00:00:00+00:00"
+
+    def test_extreme_value_returns_none(self):
+        # OverflowError / OSError on platform-out-of-range — return None
+        # rather than raising, so a single bad sender doesn't crash a
+        # row insert.
+        assert (
+            webhook_timestamp_iso({"Webhook-Timestamp": "999999999999999999999"})
+            is None
+        )

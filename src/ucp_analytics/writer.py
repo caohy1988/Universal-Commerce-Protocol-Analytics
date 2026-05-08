@@ -48,6 +48,9 @@ BQ_SCHEMA_FIELDS = [
     ("response_signed", "BOOL", "NULLABLE"),
     ("request_signature_keyid", "STRING", "NULLABLE"),
     ("response_signature_keyid", "STRING", "NULLABLE"),
+    # Standard Webhooks metadata (UCP order.md)
+    ("webhook_id", "STRING", "NULLABLE"),
+    ("webhook_timestamp", "TIMESTAMP", "NULLABLE"),
     # financial (spec total types: items_discount, subtotal, discount,
     # fulfillment, tax, fee, total)
     ("currency", "STRING", "NULLABLE"),

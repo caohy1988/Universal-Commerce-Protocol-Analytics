@@ -12,7 +12,12 @@ import logging
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
-from ucp_analytics._headers import is_signed, signature_keyid
+from ucp_analytics._headers import (
+    is_signed,
+    signature_keyid,
+    webhook_id,
+    webhook_timestamp_iso,
+)
 from ucp_analytics.events import UCPEvent
 from ucp_analytics.parser import UCPResponseParser
 from ucp_analytics.writer import AsyncBigQueryWriter
@@ -117,6 +122,15 @@ class UCPAnalyticsTracker:
 
         merchant_host = (parsed_url.hostname or "") if parsed_url else ""
 
+        # Single source of truth for "is this a webhook delivery?" — used
+        # both to gate body extraction toward the request side and to
+        # scope Webhook-Id / Webhook-Timestamp capture to webhook flows
+        # only. Per UCP order.md these headers belong to the Order Event
+        # Webhook flow; capturing them off arbitrary requests would let
+        # a buggy or malicious sender stamp webhook metadata onto a
+        # checkout / cart / catalog row.
+        is_webhook = "/webhook" in path
+
         # Classify (pass request_body for webhook flows where payload
         # is in the request and response is just an ack)
         event_type = UCPResponseParser.classify(
@@ -158,6 +172,18 @@ class UCPAnalyticsTracker:
             ),
             request_signature_keyid=signature_keyid(request_headers),
             response_signature_keyid=signature_keyid(response_headers),
+            # Standard Webhooks metadata (UCP order.md). The Webhook-*
+            # headers ride on the inbound webhook *request* and are
+            # scoped to the Order Event Webhook flow; gate on is_webhook
+            # so a checkout / cart / catalog request that happens to
+            # carry these headers (buggy sender, fuzzing, etc.) doesn't
+            # stamp webhook metadata onto an unrelated row.
+            # webhook_timestamp_iso parses the Unix-seconds value into
+            # an ISO 8601 UTC string suitable for the TIMESTAMP column.
+            webhook_id=webhook_id(request_headers) if is_webhook else None,
+            webhook_timestamp=(
+                webhook_timestamp_iso(request_headers) if is_webhook else None
+            ),
         )
 
         # Extract UCP fields from both request and response bodies.
@@ -169,8 +195,8 @@ class UCPAnalyticsTracker:
         # — survive even when the response has its own body.
         # For webhooks, the order payload is in the request body and
         # the response is just an ack like {"status": "ok"}, so we
-        # extract only from the request body.
-        is_webhook = "/webhook" in path
+        # extract only from the request body. (is_webhook computed
+        # earlier; reused here.)
         if is_webhook:
             # Webhooks normally carry the order payload in the request
             # body, with the response being just an ack. Fall back to

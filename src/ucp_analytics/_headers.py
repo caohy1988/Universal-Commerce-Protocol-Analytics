@@ -8,6 +8,7 @@ load time. Private (`_headers`) — not part of the package's public API.
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from typing import Mapping, Optional
 
 # RFC 9421 §2.3 — Signature-Input is a Structured Field Dictionary whose
@@ -48,6 +49,47 @@ def is_signed(headers: Optional[Mapping[str, str]]) -> bool:
     sig_input = lookup_header(headers, "signature-input")
     sig = lookup_header(headers, "signature")
     return bool(sig_input and sig_input.strip() and sig and sig.strip())
+
+
+def webhook_id(headers: Optional[Mapping[str, str]]) -> Optional[str]:
+    """Return the value of the `Webhook-Id` header, or None.
+
+    Standard Webhooks `Webhook-Id` (per UCP `order.md`) is the unique
+    event identifier — useful for de-duping webhook deliveries and
+    correlating analytics rows back to the merchant's outbound event.
+    """
+    raw = lookup_header(headers, "webhook-id")
+    if not raw or not raw.strip():
+        return None
+    return raw.strip()
+
+
+def webhook_timestamp_iso(
+    headers: Optional[Mapping[str, str]],
+) -> Optional[str]:
+    """Parse `Webhook-Timestamp` (Unix seconds) into an ISO 8601 UTC string.
+
+    UCP `order.md` documents `Webhook-Timestamp` as a *"Unix timestamp"*,
+    not ISO 8601 — `datetime.fromisoformat(...)` would raise on every
+    value and analytics would silently drop the column. We parse as
+    seconds-since-epoch and emit a UTC ISO 8601 string suitable for a
+    BigQuery `TIMESTAMP` column via `insert_rows_json`.
+
+    Returns None if the header is absent or doesn't parse as an integer
+    (rather than raising — analytics rows shouldn't fail on a single
+    malformed sender).
+    """
+    raw = lookup_header(headers, "webhook-timestamp")
+    if not raw or not raw.strip():
+        return None
+    try:
+        seconds = int(raw.strip())
+    except (TypeError, ValueError):
+        return None
+    try:
+        return datetime.fromtimestamp(seconds, tz=timezone.utc).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 def signature_keyid(headers: Optional[Mapping[str, str]]) -> Optional[str]:
