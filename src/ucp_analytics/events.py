@@ -117,6 +117,16 @@ class UCPEvent:
     checkout_status: Optional[str] = None
     order_id: Optional[str] = None
 
+    # --- context (UCP request-body Context object) ---
+    # source/schemas/shopping/types/context.json — capture intent/language/
+    # currency as scalars and eligibility as a JSON blob. Address fields
+    # (address_country, address_region, postal_code) are PII and deferred
+    # to a later slice with the redaction policy.
+    context_intent: Optional[str] = None
+    context_language: Optional[str] = None
+    context_currency: Optional[str] = None
+    context_eligibility_json: Optional[str] = None
+
     # --- financial (minor units / cents, spec total types) ---
     currency: Optional[str] = None
     items_discount_amount: Optional[int] = None
