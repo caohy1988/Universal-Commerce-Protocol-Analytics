@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 from ucp_analytics._headers import (
     is_signed,
     signature_keyid,
+    ucp_agent_profile_url,
     webhook_id,
     webhook_timestamp_iso,
 )
@@ -184,6 +185,12 @@ class UCPAnalyticsTracker:
             webhook_timestamp=(
                 webhook_timestamp_iso(request_headers) if is_webhook else None
             ),
+            # UCP-Agent profile URI (RFC 8941 Dictionary, parsed). Direction-
+            # neutral on purpose: on platform → business requests this is the
+            # platform's profile, on business → platform webhooks it's the
+            # business's. The legacy platform_profile_url field above keeps
+            # storing the raw header string for backwards compatibility.
+            ucp_agent_profile_url=ucp_agent_profile_url(request_headers),
         )
 
         # Extract UCP fields from both request and response bodies.

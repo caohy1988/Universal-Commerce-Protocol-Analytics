@@ -102,7 +102,13 @@ class UCPEvent:
     # --- context ---
     app_name: str = ""
     merchant_host: str = ""  # business endpoint host
-    platform_profile_url: str = ""  # UCP-Agent header value
+    # platform_profile_url stores the raw UCP-Agent header value
+    # (e.g. `profile="https://platform.example/profile"`). The name is
+    # misleading on business → platform webhook flows where the header
+    # carries the business's profile — kept for backwards compatibility.
+    # New queries should prefer ucp_agent_profile_url, which carries the
+    # parsed URI only.
+    platform_profile_url: str = ""
     transport: str = "rest"  # rest | mcp | a2a | embedded
 
     # --- HTTP ---
@@ -147,6 +153,14 @@ class UCPEvent:
     # — the spec specifies Unix seconds, not ISO 8601.
     webhook_id: Optional[str] = None
     webhook_timestamp: Optional[str] = None
+
+    # --- UCP-Agent profile (RFC 8941 Dictionary, parsed) ---
+    # The `profile` URI extracted from the UCP-Agent header. Replaces
+    # the misnamed `platform_profile_url` (which stored the raw header
+    # string) for new queries — `platform_profile_url` is kept above
+    # for backwards compatibility but the name is wrong on
+    # business → platform webhook flows.
+    ucp_agent_profile_url: Optional[str] = None
 
     # --- financial (minor units / cents, spec total types) ---
     currency: Optional[str] = None
