@@ -98,6 +98,12 @@ BQ_SCHEMA_FIELDS = [
     ("error_message", "STRING", "NULLABLE"),
     ("error_severity", "STRING", "NULLABLE"),
     ("messages_json", "JSON", "NULLABLE"),
+    # Per-severity code lists pulled from messages[] for dashboard
+    # filters. JSON arrays of strings; identity_optional_present is
+    # a fast-filter BOOL for the C11 KPI.
+    ("message_info_codes_json", "JSON", "NULLABLE"),
+    ("message_warning_codes_json", "JSON", "NULLABLE"),
+    ("identity_optional_present", "BOOL", "NULLABLE"),
     # performance
     ("latency_ms", "FLOAT", "NULLABLE"),
     # custom

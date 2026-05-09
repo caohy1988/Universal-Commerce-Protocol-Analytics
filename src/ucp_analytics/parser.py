@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from ucp_analytics.events import UCPEventType
 
@@ -370,16 +370,59 @@ class UCPResponseParser:
             if "scope" in identity:
                 result["identity_scope"] = identity["scope"]
 
-        # --- messages (errors / warnings from the server) ---
+        # --- messages (errors / warnings / info from the server) ---
+        # Single pass over messages[]. Captures the first error for
+        # the legacy error_* columns plus per-severity deduped code
+        # lists for dashboards that pivot on info/warning codes
+        # (e.g. "% of sessions emitting identity_optional"). Order-
+        # preserving dedup so the JSON arrays match the on-the-wire
+        # order, modulo duplicates.
         messages = body.get("messages")
         if isinstance(messages, list) and messages:
             result["messages_json"] = json.dumps(messages, default=str)
+            first_error_seen = False
+            info_codes: List[str] = []
+            warning_codes: List[str] = []
+            seen_info: set = set()
+            seen_warning: set = set()
             for msg in messages:
-                if isinstance(msg, dict) and msg.get("type") == "error":
-                    result["error_code"] = msg.get("code")
+                if not isinstance(msg, dict):
+                    continue
+                msg_type = msg.get("type")
+                code = msg.get("code")
+                if msg_type == "error" and not first_error_seen:
+                    result["error_code"] = code
                     result["error_message"] = msg.get("content")
                     result["error_severity"] = msg.get("severity")
-                    break
+                    first_error_seen = True
+                elif msg_type == "info" and isinstance(code, str) and code:
+                    if code not in seen_info:
+                        seen_info.add(code)
+                        info_codes.append(code)
+                elif msg_type == "warning" and isinstance(code, str) and code:
+                    if code not in seen_warning:
+                        seen_warning.add(code)
+                        warning_codes.append(code)
+            if info_codes:
+                result["message_info_codes_json"] = json.dumps(info_codes)
+                # Convenience flag for the C11 KPI ("% of unauthed
+                # sessions where auth would unlock more capabilities").
+                # Three-state nullable BOOL semantics:
+                #   True  — info codes observed AND identity_optional
+                #           is among them
+                #   False — info codes observed AND identity_optional
+                #           is NOT among them
+                #   NULL  — no info codes observed at all (no row-level
+                #           denominator contribution)
+                # Setting the flag to bool() of the membership check
+                # keeps the KPI denominator honest:
+                #   COUNT(identity_optional_present) is "rows that
+                #   could have signaled identity_optional", and
+                #   COUNT(identity_optional_present = TRUE) is the
+                #   numerator.
+                result["identity_optional_present"] = "identity_optional" in seen_info
+            if warning_codes:
+                result["message_warning_codes_json"] = json.dumps(warning_codes)
 
         # --- links ---
         links = body.get("links")
