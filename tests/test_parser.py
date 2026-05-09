@@ -758,6 +758,157 @@ class TestExtract:
         fields = UCPResponseParser.extract(body)
         assert "payment_available_instruments_json" not in fields
 
+    # --- messages[]: per-severity code lists + identity_optional ---
+
+    def test_extract_message_info_codes(self):
+        """Info-severity codes collect into message_info_codes_json,
+        order-preserved and deduped."""
+        body = {
+            "messages": [
+                {"type": "info", "code": "tax_rounded_up"},
+                {"type": "info", "code": "identity_optional"},
+                {"type": "info", "code": "tax_rounded_up"},  # duplicate
+            ]
+        }
+        fields = UCPResponseParser.extract(body)
+        codes = json.loads(fields["message_info_codes_json"])
+        assert codes == ["tax_rounded_up", "identity_optional"]
+        assert fields["identity_optional_present"] is True
+
+    def test_extract_message_warning_codes(self):
+        body = {
+            "messages": [
+                {"type": "warning", "code": "shipping_delayed"},
+                {"type": "warning", "code": "stock_low"},
+                {"type": "warning", "code": "shipping_delayed"},  # duplicate
+            ]
+        }
+        fields = UCPResponseParser.extract(body)
+        codes = json.loads(fields["message_warning_codes_json"])
+        assert codes == ["shipping_delayed", "stock_low"]
+        # No info codes → no flag.
+        assert "identity_optional_present" not in fields
+
+    def test_extract_mixed_severities_in_one_pass(self):
+        """A real checkout response carries multiple severities at once.
+        Single-pass walk must populate all three columns plus the
+        legacy error_code from the first error."""
+        body = {
+            "messages": [
+                {
+                    "type": "info",
+                    "code": "tax_rounded_up",
+                    "content": "Tax rounded up by $0.01",
+                },
+                {
+                    "type": "warning",
+                    "code": "shipping_delayed",
+                    "content": "Shipping may be delayed",
+                },
+                {
+                    "type": "error",
+                    "code": "missing_email",
+                    "content": "Email is required",
+                    "severity": "recoverable",
+                },
+                {"type": "info", "code": "identity_optional"},
+                {
+                    "type": "error",
+                    "code": "should_not_overwrite_first_error",
+                    "content": "...",
+                },
+            ]
+        }
+        fields = UCPResponseParser.extract(body)
+        # Legacy error_* columns: first error only.
+        assert fields["error_code"] == "missing_email"
+        assert fields["error_severity"] == "recoverable"
+        # Per-severity lists.
+        info = json.loads(fields["message_info_codes_json"])
+        assert info == ["tax_rounded_up", "identity_optional"]
+        warnings = json.loads(fields["message_warning_codes_json"])
+        assert warnings == ["shipping_delayed"]
+        # Identity-optional flag picked up from the info pass.
+        assert fields["identity_optional_present"] is True
+
+    def test_identity_optional_present_false_when_other_info_codes(self):
+        """Three-state semantics: when info codes exist but none is
+        identity_optional, the flag must be False — not NULL. NULL is
+        reserved for rows with no info codes at all (no denominator
+        contribution). Without this distinction the C11 KPI denominator
+        would conflate 'observed unsigned' with 'never observed'."""
+        body = {
+            "messages": [
+                {"type": "info", "code": "tax_rounded_up"},
+                {"type": "info", "code": "shipping_estimated"},
+            ]
+        }
+        fields = UCPResponseParser.extract(body)
+        # info codes observed → flag must land as a concrete BOOL.
+        assert fields["identity_optional_present"] is False
+        # And the codes themselves are still in the JSON column.
+        codes = json.loads(fields["message_info_codes_json"])
+        assert codes == ["tax_rounded_up", "shipping_estimated"]
+
+    def test_identity_optional_flag_only_on_info_severity(self):
+        """The convenience flag matches the info-code 'identity_optional'
+        specifically; an error/warning code with the same string is a
+        different signal and should NOT trip the flag."""
+        body = {
+            "messages": [
+                {"type": "warning", "code": "identity_optional"},
+                {"type": "error", "code": "identity_optional"},
+            ]
+        }
+        fields = UCPResponseParser.extract(body)
+        # info_codes empty → flag absent.
+        assert "identity_optional_present" not in fields
+        assert "message_info_codes_json" not in fields
+        warnings = json.loads(fields["message_warning_codes_json"])
+        assert warnings == ["identity_optional"]
+
+    def test_extract_messages_only_errors_no_info_warning_columns(self):
+        body = {
+            "messages": [
+                {
+                    "type": "error",
+                    "code": "missing_phone",
+                    "content": "Phone is required",
+                },
+            ]
+        }
+        fields = UCPResponseParser.extract(body)
+        assert fields["error_code"] == "missing_phone"
+        assert "message_info_codes_json" not in fields
+        assert "message_warning_codes_json" not in fields
+        assert "identity_optional_present" not in fields
+
+    def test_extract_messages_skips_malformed_codes(self):
+        """Non-string or empty codes are dropped from the per-severity
+        lists. A single bad sender shouldn't pollute the column with
+        unfilterable values."""
+        body = {
+            "messages": [
+                {"type": "info", "code": "valid_code"},
+                {"type": "info", "code": ""},  # empty string
+                {"type": "info", "code": None},  # null
+                {"type": "info", "code": 42},  # non-string
+                {"type": "info"},  # missing code
+                {"type": "info", "code": "another_valid_code"},
+            ]
+        }
+        fields = UCPResponseParser.extract(body)
+        codes = json.loads(fields["message_info_codes_json"])
+        assert codes == ["valid_code", "another_valid_code"]
+
+    def test_extract_no_messages_no_columns(self):
+        body = {"id": "chk_123", "status": "ready_for_complete"}
+        fields = UCPResponseParser.extract(body)
+        assert "message_info_codes_json" not in fields
+        assert "message_warning_codes_json" not in fields
+        assert "identity_optional_present" not in fields
+        assert "messages_json" not in fields
+
     def test_extract_order_confirmation_in_checkout(self):
         """Spec: checkout.order is a nested object with id and permalink_url."""
         body = {
