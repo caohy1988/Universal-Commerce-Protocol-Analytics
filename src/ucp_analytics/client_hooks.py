@@ -103,6 +103,16 @@ class UCPClientEventHook:
         try:
             headers = dict(request.headers)
             response_headers = dict(response.headers)
+            # RFC 7235 §4.1 permits multiple WWW-Authenticate field
+            # lines on a single response. httpx.Headers preserves them,
+            # but `dict(...)` collapses to one — which would silently
+            # lose the Bearer challenge on a multi-scheme response and
+            # leave auth_challenge_* null. Re-merge with `, ` so
+            # parse_bearer_challenge() sees both. (Same fix shape as
+            # UCPAnalyticsMiddleware.)
+            www_auth_values = response.headers.get_list("www-authenticate")
+            if len(www_auth_values) > 1:
+                response_headers["www-authenticate"] = ", ".join(www_auth_values)
             await self.tracker.record_http(
                 method=request.method,
                 url=str(request.url),

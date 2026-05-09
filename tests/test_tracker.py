@@ -481,6 +481,113 @@ class TestRecordHttp:
         assert event.ucp_agent_profile_url is None
         assert event.platform_profile_url == 'version="2026-04-08"'
 
+    # --- WWW-Authenticate Bearer challenge (RFC 7235 / 6750) ---
+
+    async def test_auth_challenge_extracted_from_response_headers(
+        self, tracker, mock_writer
+    ):
+        """A 401 with a full Bearer challenge populates all four
+        auth_challenge_* columns, parsed off the response side."""
+        challenge = (
+            'Bearer realm="https://merchant.example",'
+            ' error="insufficient_scope",'
+            ' scope="dev.ucp.shopping.order:manage",'
+            " resource_metadata="
+            '"https://merchant.example/.well-known/oauth-protected-resource"'
+        )
+        event = await tracker.record_http(
+            method="GET",
+            path="/orders/order_123",
+            status_code=401,
+            response_headers={"WWW-Authenticate": challenge},
+        )
+        assert event.auth_challenge_realm == "https://merchant.example"
+        assert event.auth_challenge_error == "insufficient_scope"
+        assert event.auth_challenge_scope == "dev.ucp.shopping.order:manage"
+        assert (
+            event.auth_challenge_resource_metadata
+            == "https://merchant.example/.well-known/oauth-protected-resource"
+        )
+
+    async def test_auth_challenge_invalid_token(self, tracker, mock_writer):
+        """invalid_token challenges populate error + realm only."""
+        event = await tracker.record_http(
+            method="GET",
+            path="/orders/order_123",
+            status_code=401,
+            response_headers={
+                "WWW-Authenticate": (
+                    'Bearer realm="https://merchant.example", error="invalid_token"'
+                )
+            },
+        )
+        assert event.auth_challenge_realm == "https://merchant.example"
+        assert event.auth_challenge_error == "invalid_token"
+        assert event.auth_challenge_scope is None
+        assert event.auth_challenge_resource_metadata is None
+
+    async def test_no_auth_challenge_when_header_absent(self, tracker, mock_writer):
+        """Successful exchanges don't carry a Bearer challenge — all
+        four columns stay None."""
+        event = await tracker.record_http(
+            method="GET",
+            path="/orders/order_123",
+            status_code=200,
+            response_headers={"content-type": "application/json"},
+        )
+        assert event.auth_challenge_realm is None
+        assert event.auth_challenge_error is None
+        assert event.auth_challenge_scope is None
+        assert event.auth_challenge_resource_metadata is None
+
+    async def test_no_auth_challenge_when_response_headers_omitted(
+        self, tracker, mock_writer
+    ):
+        """Direct callers that don't pass response_headers at all get
+        None for the auth_challenge_* columns."""
+        event = await tracker.record_http(
+            method="GET",
+            path="/orders/order_123",
+            status_code=401,
+        )
+        assert event.auth_challenge_realm is None
+        assert event.auth_challenge_error is None
+        assert event.auth_challenge_scope is None
+        assert event.auth_challenge_resource_metadata is None
+
+    async def test_basic_challenge_does_not_populate_columns(
+        self, tracker, mock_writer
+    ):
+        """A non-Bearer scheme (e.g. Basic) doesn't trip the helper —
+        we only care about Bearer for UCP auth analytics."""
+        event = await tracker.record_http(
+            method="GET",
+            path="/orders/order_123",
+            status_code=401,
+            response_headers={
+                "WWW-Authenticate": 'Basic realm="merchant"',
+            },
+        )
+        assert event.auth_challenge_realm is None
+        assert event.auth_challenge_error is None
+
+    async def test_auth_challenge_lookup_is_case_insensitive(
+        self, tracker, mock_writer
+    ):
+        """The helper itself is case-insensitive on the header name and
+        scheme — pin that the tracker doesn't pre-lowercase or normalize
+        in a way that would break the parser."""
+        event = await tracker.record_http(
+            method="GET",
+            path="/orders/order_123",
+            status_code=401,
+            response_headers={
+                "www-authenticate": ('BEARER realm="x", error="insufficient_scope"')
+            },
+        )
+        assert event.auth_challenge_realm == "x"
+        assert event.auth_challenge_error == "insufficient_scope"
+
     async def test_webhook_headers_rejected_on_non_webhook_path(
         self, tracker, mock_writer
     ):

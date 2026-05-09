@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 from ucp_analytics._headers import (
     is_signed,
+    parse_bearer_challenge,
     signature_keyid,
     ucp_agent_profile_url,
     webhook_id,
@@ -192,6 +193,19 @@ class UCPAnalyticsTracker:
             # storing the raw header string for backwards compatibility.
             ucp_agent_profile_url=ucp_agent_profile_url(request_headers),
         )
+
+        # WWW-Authenticate Bearer challenge (RFC 7235 / RFC 6750 / RFC 9728).
+        # Lives on the response side — issued by the merchant on 401/403.
+        # We parse whenever the challenge is present rather than gating on
+        # status_code, which keeps the helper composable; senders that put
+        # WWW-Authenticate on a non-failure response are technically out of
+        # spec but we record what they sent rather than dropping data.
+        challenge = parse_bearer_challenge(response_headers)
+        if challenge:
+            event.auth_challenge_error = challenge.get("error")
+            event.auth_challenge_scope = challenge.get("scope")
+            event.auth_challenge_realm = challenge.get("realm")
+            event.auth_challenge_resource_metadata = challenge.get("resource_metadata")
 
         # Extract UCP fields from both request and response bodies.
         # Response takes precedence on conflict (it's the merchant-

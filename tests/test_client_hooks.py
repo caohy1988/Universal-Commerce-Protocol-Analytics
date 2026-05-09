@@ -244,6 +244,40 @@ class TestUCPClientEventHookPathFiltering:
             "Signature-Input" in call_kwargs["response_headers"]
         )
 
+    async def test_multi_value_www_authenticate_preserved(self, hook, mock_tracker):
+        """RFC 7235 §4.1 permits multiple WWW-Authenticate field lines.
+        httpx.Headers ships them as separate entries; dict() flattens
+        to one. The hook must coalesce them into a single comma-joined
+        value so parse_bearer_challenge() can find the Bearer challenge
+        even when a non-Bearer (Basic) appears on an earlier line."""
+        from ucp_analytics._headers import parse_bearer_challenge
+
+        request = httpx.Request("GET", "https://merchant.example/orders/order_123")
+        response = httpx.Response(
+            status_code=401,
+            request=request,
+            # List-of-tuples lets httpx preserve repeated headers.
+            headers=[
+                ("WWW-Authenticate", 'Basic realm="legacy"'),
+                (
+                    "WWW-Authenticate",
+                    'Bearer realm="merchant", error="invalid_token"',
+                ),
+            ],
+        )
+        response._elapsed = timedelta(milliseconds=10)
+
+        await hook(response)
+
+        mock_tracker.record_http.assert_awaited_once()
+        response_headers = mock_tracker.record_http.call_args.kwargs["response_headers"]
+        # Both schemes are now reachable through the parser.
+        params = parse_bearer_challenge(response_headers)
+        assert params == {
+            "realm": "merchant",
+            "error": "invalid_token",
+        }
+
     async def test_skips_oauth2_proxy_lookalike(self, hook, mock_tracker):
         # `/oauth2-proxy` is real infra; segment-aware filter must
         # reject it.
