@@ -217,6 +217,15 @@ class UCPEvent:
     error_message: Optional[str] = None
     error_severity: Optional[str] = None
     messages_json: Optional[str] = None
+    # Deduped lists of message codes by severity. Stored as JSON arrays
+    # so dashboards can pivot via JSON_QUERY_ARRAY without regex over
+    # the full messages_json blob. identity_optional_present is a
+    # convenience flag (PR #354 info code) — answers "% of unauthed
+    # sessions where login would have unlocked more capabilities" with
+    # a single-column predicate.
+    message_info_codes_json: Optional[str] = None
+    message_warning_codes_json: Optional[str] = None
+    identity_optional_present: Optional[bool] = None
 
     # --- performance ---
     latency_ms: Optional[float] = None
