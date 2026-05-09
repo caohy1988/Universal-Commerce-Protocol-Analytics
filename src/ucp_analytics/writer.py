@@ -109,6 +109,15 @@ BQ_SCHEMA_FIELDS = [
     ("message_info_codes_json", "JSON", "NULLABLE"),
     ("message_warning_codes_json", "JSON", "NULLABLE"),
     ("identity_optional_present", "BOOL", "NULLABLE"),
+    # A5 — eligibility verification outcome. Three-state nullable BOOL
+    # trio derived from messages[].code; mutually exclusive in
+    # well-formed responses. NULL when no eligibility outcome code
+    # surfaced (no row-level denominator), so dashboards can use
+    # COUNT(eligibility_*_present) as the "verification surfaced"
+    # denominator and the per-column TRUE count as each numerator.
+    ("eligibility_accepted_present", "BOOL", "NULLABLE"),
+    ("eligibility_not_accepted_present", "BOOL", "NULLABLE"),
+    ("eligibility_invalid_present", "BOOL", "NULLABLE"),
     # performance
     ("latency_ms", "FLOAT", "NULLABLE"),
     # custom

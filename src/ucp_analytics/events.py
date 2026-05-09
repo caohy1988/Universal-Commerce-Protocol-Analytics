@@ -240,6 +240,17 @@ class UCPEvent:
     message_warning_codes_json: Optional[str] = None
     identity_optional_present: Optional[bool] = None
 
+    # A5 — Eligibility verification outcome (PR #250). The three codes
+    # come from messages[].code; UCP doesn't prescribe verification, so
+    # the outcome is observed not asserted. Three-state nullable BOOLs:
+    # TRUE when this code is the observed outcome, FALSE when a
+    # different eligibility outcome fired (mutually exclusive trio),
+    # NULL when no eligibility outcome code surfaced. Dashboards can
+    # compose any "verified" notion from the trio + messages_json.
+    eligibility_accepted_present: Optional[bool] = None
+    eligibility_not_accepted_present: Optional[bool] = None
+    eligibility_invalid_present: Optional[bool] = None
+
     # --- performance ---
     latency_ms: Optional[float] = None
 

@@ -16,6 +16,22 @@ from typing import Any, Dict, List, Optional
 
 from ucp_analytics.events import UCPEventType
 
+# A5 — Eligibility verification outcome codes. Per UCP `eligibility.md`,
+# verification outcomes surface through `messages[].code` rather than a
+# structured boolean. The trio is mutually exclusive in well-formed
+# responses but the codes span severities: `eligibility_invalid` is
+# canonically `error` (it appears in upstream `error_code` examples),
+# while `eligibility_accepted` / `eligibility_not_accepted` are
+# typically `info`. Walking only one severity would miss the others, so
+# the eligibility capture is cross-severity.
+_ELIGIBILITY_OUTCOME_CODES = frozenset(
+    {
+        "eligibility_accepted",
+        "eligibility_not_accepted",
+        "eligibility_invalid",
+    }
+)
+
 
 class UCPResponseParser:
     """Extract analytics-relevant fields from UCP request/response bodies."""
@@ -385,6 +401,7 @@ class UCPResponseParser:
             warning_codes: List[str] = []
             seen_info: set = set()
             seen_warning: set = set()
+            seen_eligibility: set = set()
             for msg in messages:
                 if not isinstance(msg, dict):
                     continue
@@ -403,6 +420,14 @@ class UCPResponseParser:
                     if code not in seen_warning:
                         seen_warning.add(code)
                         warning_codes.append(code)
+
+                # A5 — eligibility outcome codes are cross-severity:
+                # `eligibility_invalid` is canonically `error`, the
+                # other two are typically `info`. Capture from any
+                # severity (separate `if`, not `elif`) so the error
+                # branch above doesn't suppress them.
+                if isinstance(code, str) and code in _ELIGIBILITY_OUTCOME_CODES:
+                    seen_eligibility.add(code)
             if info_codes:
                 result["message_info_codes_json"] = json.dumps(info_codes)
                 # Convenience flag for the C11 KPI ("% of unauthed
@@ -423,6 +448,37 @@ class UCPResponseParser:
                 result["identity_optional_present"] = "identity_optional" in seen_info
             if warning_codes:
                 result["message_warning_codes_json"] = json.dumps(warning_codes)
+
+            # A5 — three-state eligibility outcome flags.
+            # Per UCP eligibility.md the verification outcome is
+            # signalled by one of three message codes; the trio is
+            # mutually exclusive in well-formed responses. Three-state
+            # nullable BOOL semantics mirror identity_optional_present
+            # (C11), with the denominator being "we observed at least
+            # one eligibility outcome code in this row":
+            #   True  — this code is among the seen eligibility codes
+            #   False — at least one eligibility outcome code was
+            #           observed but it was NOT this one (the trio is
+            #           mutually exclusive, so when one fires the
+            #           other two are concretely absent)
+            #   NULL  — no eligibility outcome code observed at all;
+            #           verification may not have run, or the code
+            #           may not have surfaced through messages — no
+            #           row-level denominator contribution
+            # Setting the trio together keeps the dashboard math
+            # honest: COUNT(eligibility_*_present) is "rows where
+            # eligibility verification surfaced an outcome", and each
+            # column's TRUE count is its outcome's numerator.
+            if seen_eligibility:
+                result["eligibility_accepted_present"] = (
+                    "eligibility_accepted" in seen_eligibility
+                )
+                result["eligibility_not_accepted_present"] = (
+                    "eligibility_not_accepted" in seen_eligibility
+                )
+                result["eligibility_invalid_present"] = (
+                    "eligibility_invalid" in seen_eligibility
+                )
 
         # --- links ---
         links = body.get("links")

@@ -908,6 +908,223 @@ class TestExtract:
         assert "message_warning_codes_json" not in fields
         assert "identity_optional_present" not in fields
         assert "messages_json" not in fields
+        # No messages → no eligibility flag denominator, all three NULL.
+        assert "eligibility_accepted_present" not in fields
+        assert "eligibility_not_accepted_present" not in fields
+        assert "eligibility_invalid_present" not in fields
+
+    # --- A5: eligibility verification outcome (info + error severity) ---
+
+    def test_eligibility_accepted_sets_accepted_true_others_false(self):
+        """`eligibility_accepted` as info severity (the typical shape)
+        sets accepted=TRUE and the other two FALSE — the trio is
+        mutually exclusive in well-formed responses, so when one fires
+        the dashboard can read FALSE for the other two as a concrete
+        signal, not 'unknown'."""
+        body = {
+            "messages": [
+                {
+                    "type": "info",
+                    "code": "eligibility_accepted",
+                    "content": "Loyalty member discount applies",
+                },
+            ]
+        }
+        fields = UCPResponseParser.extract(body)
+        assert fields["eligibility_accepted_present"] is True
+        assert fields["eligibility_not_accepted_present"] is False
+        assert fields["eligibility_invalid_present"] is False
+
+    def test_eligibility_not_accepted_sets_only_that_flag_true(self):
+        body = {
+            "messages": [
+                {
+                    "type": "info",
+                    "code": "eligibility_not_accepted",
+                    "content": "Item not eligible for promo",
+                },
+            ]
+        }
+        fields = UCPResponseParser.extract(body)
+        assert fields["eligibility_accepted_present"] is False
+        assert fields["eligibility_not_accepted_present"] is True
+        assert fields["eligibility_invalid_present"] is False
+
+    def test_eligibility_invalid_walked_from_error_severity(self):
+        """`eligibility_invalid` is canonically `error` severity in
+        upstream's `error_code` enum, while the other two are
+        typically `info`. The cross-severity walk must pick this code
+        up from the error message — without that, every
+        `eligibility_invalid` row would underpopulate the trio.
+        Pin that the legacy error_code column also still gets
+        populated from the same message."""
+        body = {
+            "messages": [
+                {
+                    "type": "error",
+                    "code": "eligibility_invalid",
+                    "content": "Eligibility claim malformed",
+                    "severity": "recoverable",
+                },
+            ]
+        }
+        fields = UCPResponseParser.extract(body)
+        assert fields["eligibility_accepted_present"] is False
+        assert fields["eligibility_not_accepted_present"] is False
+        assert fields["eligibility_invalid_present"] is True
+        # Legacy first-error column still populated from the same msg.
+        assert fields["error_code"] == "eligibility_invalid"
+
+    def test_eligibility_outcome_codes_independent_of_other_codes(self):
+        """A non-eligibility info code in the same response must NOT
+        falsely populate the trio. The denominator is "an eligibility
+        outcome code was observed", not "any info code was observed"
+        — otherwise every checkout that ships `tax_rounded_up` would
+        report eligibility_*_present = FALSE for all three, polluting
+        the KPI."""
+        body = {
+            "messages": [
+                {"type": "info", "code": "tax_rounded_up"},
+                {"type": "info", "code": "identity_optional"},
+            ]
+        }
+        fields = UCPResponseParser.extract(body)
+        assert "eligibility_accepted_present" not in fields
+        assert "eligibility_not_accepted_present" not in fields
+        assert "eligibility_invalid_present" not in fields
+
+    def test_eligibility_no_codes_leaves_all_three_null(self):
+        """No eligibility outcome code in messages → all three NULL,
+        not FALSE. NULL is reserved for 'verification did not
+        surface', which is a different signal from 'verification ran
+        and a different outcome fired'."""
+        body = {
+            "messages": [
+                {"type": "warning", "code": "shipping_delayed"},
+            ],
+            "context": {
+                "eligibility": [{"claim": "loyalty_member"}],
+            },
+        }
+        fields = UCPResponseParser.extract(body)
+        # Even with context.eligibility authored, absence of an
+        # outcome code keeps the trio NULL. The eligibility claim
+        # payload lives in its own column.
+        assert "eligibility_accepted_present" not in fields
+        assert "eligibility_not_accepted_present" not in fields
+        assert "eligibility_invalid_present" not in fields
+        assert fields["context_eligibility_json"] == json.dumps(
+            [{"claim": "loyalty_member"}]
+        )
+
+    def test_eligibility_duplicate_codes_collapse(self):
+        """Set-based capture: duplicate codes don't change the
+        outcome. Pin that a sender that emits the same eligibility
+        code twice produces the same flag values as a single
+        emission — no quadratic JSON growth, no flicker."""
+        body = {
+            "messages": [
+                {"type": "info", "code": "eligibility_accepted"},
+                {"type": "info", "code": "eligibility_accepted"},
+            ]
+        }
+        fields = UCPResponseParser.extract(body)
+        assert fields["eligibility_accepted_present"] is True
+        assert fields["eligibility_not_accepted_present"] is False
+        assert fields["eligibility_invalid_present"] is False
+
+    def test_eligibility_two_codes_simultaneously_both_true(self):
+        """The trio is mutually exclusive in well-formed responses,
+        but if a malformed sender ships two outcome codes in the
+        same row we record what they sent — both flags True, the
+        third False. Analysts can detect the conflict via
+        messages_json. This is the signal-fidelity guarantee:
+        analytics records observed reality, not normalized reality."""
+        body = {
+            "messages": [
+                {"type": "info", "code": "eligibility_accepted"},
+                {
+                    "type": "error",
+                    "code": "eligibility_invalid",
+                    "content": "Claim invalidated downstream",
+                },
+            ]
+        }
+        fields = UCPResponseParser.extract(body)
+        assert fields["eligibility_accepted_present"] is True
+        assert fields["eligibility_invalid_present"] is True
+        assert fields["eligibility_not_accepted_present"] is False
+
+    def test_eligibility_malformed_messages_skipped(self):
+        """Non-string codes / missing code field don't crash and
+        don't pollute the eligibility trio. A single bad sender
+        shouldn't take down the row's other extracted fields."""
+        body = {
+            "messages": [
+                {"type": "info", "code": None},
+                {"type": "info", "code": 42},
+                {"type": "info"},  # missing code
+                "not-a-dict",  # malformed message entry
+                {"type": "info", "code": "eligibility_accepted"},
+            ]
+        }
+        fields = UCPResponseParser.extract(body)
+        assert fields["eligibility_accepted_present"] is True
+        assert fields["eligibility_not_accepted_present"] is False
+        assert fields["eligibility_invalid_present"] is False
+
+    def test_eligibility_alongside_unrelated_messages(self):
+        """Real responses carry a mix of unrelated codes and possibly
+        an eligibility outcome. Pin that the outcome trio coexists
+        cleanly with the existing per-severity code lists and the
+        first-error capture, exercising the single-pass loop."""
+        body = {
+            "messages": [
+                {"type": "info", "code": "tax_rounded_up"},
+                {"type": "warning", "code": "shipping_delayed"},
+                {"type": "info", "code": "eligibility_not_accepted"},
+                {
+                    "type": "error",
+                    "code": "missing_email",
+                    "content": "Email required",
+                },
+            ]
+        }
+        fields = UCPResponseParser.extract(body)
+        assert fields["eligibility_not_accepted_present"] is True
+        assert fields["eligibility_accepted_present"] is False
+        assert fields["eligibility_invalid_present"] is False
+        # Existing columns remain unaffected.
+        info = json.loads(fields["message_info_codes_json"])
+        assert info == ["tax_rounded_up", "eligibility_not_accepted"]
+        warnings = json.loads(fields["message_warning_codes_json"])
+        assert warnings == ["shipping_delayed"]
+        assert fields["error_code"] == "missing_email"
+
+    def test_context_eligibility_queryable_via_existing_column(self):
+        """The context.eligibility[] payload from C1 already lands in
+        context_eligibility_json. A5 doesn't change that column — pin
+        that the new outcome trio coexists with it, so dashboards can
+        join on `JSON_QUERY(context_eligibility_json, '$[0].claim')`
+        and `eligibility_accepted_present = TRUE` in the same query."""
+        body = {
+            "context": {
+                "eligibility": [
+                    {"claim": "loyalty_member", "tier": "gold"},
+                ],
+            },
+            "messages": [
+                {"type": "info", "code": "eligibility_accepted"},
+            ],
+        }
+        fields = UCPResponseParser.extract(body)
+        # JSON column queryable by JSON_QUERY downstream.
+        eligibility = json.loads(fields["context_eligibility_json"])
+        assert eligibility == [{"claim": "loyalty_member", "tier": "gold"}]
+        # Outcome trio populated independently from the claim payload.
+        assert fields["eligibility_accepted_present"] is True
+        assert fields["eligibility_not_accepted_present"] is False
+        assert fields["eligibility_invalid_present"] is False
 
     def test_extract_order_confirmation_in_checkout(self):
         """Spec: checkout.order is a nested object with id and permalink_url."""
