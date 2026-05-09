@@ -625,6 +625,139 @@ class TestExtract:
         assert "context_currency" not in fields
         assert "context_eligibility_json" not in fields
 
+    # --- payment_handlers[*].available_instruments ---
+
+    def test_extract_payment_available_instruments_array_shape(self):
+        """body.ucp.payment_handlers as an array of handler objects."""
+        body = {
+            "ucp": {
+                "version": "2026-04-08",
+                "payment_handlers": [
+                    {
+                        "id": "gpay",
+                        "name": "Google Pay",
+                        "available_instruments": [
+                            {"type": "card", "brand": "visa"},
+                            {"type": "card", "brand": "mastercard"},
+                        ],
+                    },
+                    {
+                        "id": "stripe",
+                        "name": "Stripe",
+                        "available_instruments": [
+                            {"type": "card", "brand": "amex"},
+                        ],
+                    },
+                ],
+            },
+        }
+        fields = UCPResponseParser.extract(body)
+        instruments = json.loads(fields["payment_available_instruments_json"])
+        assert len(instruments) == 2
+        gpay = next(h for h in instruments if h.get("id") == "gpay")
+        assert len(gpay["available_instruments"]) == 2
+        stripe = next(h for h in instruments if h.get("id") == "stripe")
+        assert stripe["available_instruments"][0]["brand"] == "amex"
+
+    def test_extract_payment_available_instruments_dict_keyed_shape(self):
+        """body.ucp.payment_handlers as a dict keyed by handler name —
+        the same registry shape capabilities use."""
+        body = {
+            "ucp": {
+                "version": "2026-04-08",
+                "payment_handlers": {
+                    "dev.example.gpay": [
+                        {
+                            "id": "gpay",
+                            "available_instruments": [{"type": "wallet"}],
+                        }
+                    ],
+                },
+            },
+        }
+        fields = UCPResponseParser.extract(body)
+        instruments = json.loads(fields["payment_available_instruments_json"])
+        assert len(instruments) == 1
+        # _normalize_registry stamps the dict key as `name` on the entry.
+        assert instruments[0]["name"] == "dev.example.gpay"
+        assert instruments[0]["available_instruments"][0]["type"] == "wallet"
+
+    def test_extract_payment_handlers_without_instruments_dropped(self):
+        """A handler that doesn't declare available_instruments isn't
+        useful for the instruments-offered KPI; drop it from the
+        stored payload so the column reflects only handlers that
+        publish a registry."""
+        body = {
+            "ucp": {
+                "payment_handlers": [
+                    {"id": "gpay", "available_instruments": [{"type": "card"}]},
+                    {"id": "applepay"},  # no available_instruments
+                    {"id": "stripe", "available_instruments": []},  # empty
+                ],
+            },
+        }
+        fields = UCPResponseParser.extract(body)
+        instruments = json.loads(fields["payment_available_instruments_json"])
+        assert len(instruments) == 1
+        assert instruments[0]["id"] == "gpay"
+
+    def test_extract_payment_handlers_with_malformed_instruments_dropped(
+        self,
+    ):
+        """payment_handler.json defines available_instruments as an
+        array. Any other shape (string, dict, scalar) is malformed
+        and would break dashboard assumptions around
+        JSON_QUERY_ARRAY(...available_instruments...). Drop the
+        handler so a single bad sender can't corrupt the column
+        contract for everyone querying the table."""
+        body = {
+            "ucp": {
+                "payment_handlers": [
+                    {"id": "gpay", "available_instruments": [{"type": "card"}]},
+                    # String instead of array — malformed.
+                    {"id": "bad-string", "available_instruments": "card"},
+                    # Dict instead of array — malformed.
+                    {"id": "bad-dict", "available_instruments": {"type": "card"}},
+                    # Scalar truthy values that pre-fix would have
+                    # survived `if h.get(...)`.
+                    {"id": "bad-int", "available_instruments": 1},
+                    {"id": "bad-bool", "available_instruments": True},
+                ],
+            },
+        }
+        fields = UCPResponseParser.extract(body)
+        instruments = json.loads(fields["payment_available_instruments_json"])
+        assert len(instruments) == 1
+        assert instruments[0]["id"] == "gpay"
+
+    def test_extract_payment_available_instruments_does_not_misread_payment_object(
+        self,
+    ):
+        """The new column sources from body.ucp.payment_handlers, not
+        body.payment.handlers — the latter is selected/submitted
+        instruments on a checkout response, not the handler-declaration
+        registry. Pin this so the column doesn't accidentally start
+        sourcing from the wrong path."""
+        body = {
+            "ucp": {"version": "2026-04-08"},
+            # body.payment.handlers — NOT the source for this column.
+            "payment": {
+                "handlers": [{"id": "gpay", "type": "wallet", "brand": "google_pay"}]
+            },
+        }
+        fields = UCPResponseParser.extract(body)
+        # Existing payment_handler_id still extracted for backwards compat.
+        assert fields["payment_handler_id"] == "gpay"
+        # But the new available-instruments column stays absent because
+        # ucp.payment_handlers is missing.
+        assert "payment_available_instruments_json" not in fields
+
+    def test_extract_no_payment_handlers_in_ucp(self):
+        """No ucp.payment_handlers → column absent."""
+        body = {"ucp": {"version": "2026-04-08"}}
+        fields = UCPResponseParser.extract(body)
+        assert "payment_available_instruments_json" not in fields
+
     def test_extract_order_confirmation_in_checkout(self):
         """Spec: checkout.order is a nested object with id and permalink_url."""
         body = {

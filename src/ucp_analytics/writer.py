@@ -70,6 +70,11 @@ BQ_SCHEMA_FIELDS = [
     ("payment_handler_id", "STRING", "NULLABLE"),
     ("payment_instrument_type", "STRING", "NULLABLE"),
     ("payment_brand", "STRING", "NULLABLE"),
+    # body.ucp.payment_handlers[*].available_instruments — per-handler
+    # registry, preserved in full so downstream can pivot on handler id
+    # or instrument type. JSON, not STRING, so dashboards can query via
+    # JSON_QUERY_ARRAY without an additional decode round-trip.
+    ("payment_available_instruments_json", "JSON", "NULLABLE"),
     # capabilities
     ("ucp_version", "STRING", "NULLABLE"),
     ("capabilities_json", "JSON", "NULLABLE"),
