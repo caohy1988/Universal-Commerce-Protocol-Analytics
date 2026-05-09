@@ -117,6 +117,17 @@ class UCPAnalyticsMiddleware(BaseHTTPMiddleware):
         try:
             headers = dict(request.headers)
             response_headers = dict(response.headers)
+            # RFC 7235 §4.1 permits multiple WWW-Authenticate field
+            # lines on a single response (a Basic and a Bearer
+            # challenge often appear on separate lines). Starlette's
+            # MutableHeaders preserves them, but `dict(...)` collapses
+            # to the first occurrence — which would silently lose the
+            # Bearer challenge on a Basic-then-Bearer response and
+            # leave auth_challenge_* null. Re-merge them with a `, `
+            # separator so parse_bearer_challenge() sees both.
+            www_auth_values = response.headers.getlist("www-authenticate")
+            if len(www_auth_values) > 1:
+                response_headers["www-authenticate"] = ", ".join(www_auth_values)
             task = asyncio.create_task(
                 self.tracker.record_http(
                     method=request.method,

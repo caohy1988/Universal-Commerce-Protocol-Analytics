@@ -115,3 +115,97 @@ class TestMiddlewareDetectorRejectsNearMisses:
 
 # Direct unit coverage of path_matches_marker lives in tests/test_path_match.py
 # so it runs even in environments without the optional Starlette dependency.
+
+
+# ---------------------------------------------------------------------- #
+# Middleware integration tests
+# ---------------------------------------------------------------------- #
+# These exercise dispatch() through Starlette's TestClient so we can
+# verify how the middleware shapes headers (specifically, multi-value
+# WWW-Authenticate preservation) before they reach record_http().
+
+
+class TestMiddlewareMultiValueResponseHeaders:
+    """RFC 7235 §4.1 permits multiple WWW-Authenticate field lines.
+    Starlette's MutableHeaders preserves them, but `dict(...)` flattens
+    to one — which would lose the Bearer challenge if Basic appears on
+    an earlier line. Pin that the middleware re-merges them so
+    parse_bearer_challenge() can find Bearer downstream."""
+
+    def _build_app(self, mock_tracker, www_authenticate_lines):
+        from starlette.applications import Starlette
+        from starlette.responses import Response
+        from starlette.routing import Route
+
+        from ucp_analytics.middleware import UCPAnalyticsMiddleware
+
+        async def auth_failure(request):
+            response = Response(status_code=401, content=b"")
+            # Use append-style so each line is a distinct field line —
+            # MutableHeaders.__setitem__ would replace.
+            del response.headers["www-authenticate"]
+            for line in www_authenticate_lines:
+                response.headers.append("WWW-Authenticate", line)
+            return response
+
+        app = Starlette(routes=[Route("/orders/{id}", auth_failure)])
+        app.add_middleware(UCPAnalyticsMiddleware, tracker=mock_tracker)
+        return app
+
+    @pytest.fixture
+    def mock_tracker(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        tracker = MagicMock()
+        tracker.record_http = AsyncMock()
+        # register_pending_task is called synchronously in dispatch();
+        # provide a no-op implementation so it doesn't raise.
+        tracker.register_pending_task = MagicMock()
+        return tracker
+
+    def test_basic_then_bearer_two_field_lines_preserves_bearer(self, mock_tracker):
+        from starlette.testclient import TestClient
+
+        from ucp_analytics._headers import parse_bearer_challenge
+
+        app = self._build_app(
+            mock_tracker,
+            [
+                'Basic realm="legacy"',
+                'Bearer realm="merchant", error="invalid_token"',
+            ],
+        )
+        with TestClient(app) as client:
+            client.get("/orders/order_123")
+
+        mock_tracker.record_http.assert_awaited_once()
+        response_headers = mock_tracker.record_http.call_args.kwargs["response_headers"]
+        # The Bearer challenge survives the dict() collapse and is
+        # reachable through the parser despite Basic being on an
+        # earlier field line.
+        params = parse_bearer_challenge(response_headers)
+        assert params == {
+            "realm": "merchant",
+            "error": "invalid_token",
+        }
+
+    def test_single_www_authenticate_passes_through_unchanged(self, mock_tracker):
+        """The merge logic only kicks in when there are multiple field
+        lines; the single-line case stays as-is so we don't double-
+        encode commas in well-formed senders."""
+        from starlette.testclient import TestClient
+
+        app = self._build_app(
+            mock_tracker,
+            ['Bearer realm="merchant", error="invalid_token"'],
+        )
+        with TestClient(app) as client:
+            client.get("/orders/order_123")
+
+        mock_tracker.record_http.assert_awaited_once()
+        response_headers = mock_tracker.record_http.call_args.kwargs["response_headers"]
+        # Same value as the original — no extra processing.
+        assert (
+            response_headers["www-authenticate"]
+            == 'Bearer realm="merchant", error="invalid_token"'
+        )

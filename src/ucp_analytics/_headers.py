@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from typing import Mapping, Optional
+from typing import Dict, Mapping, Optional
 
 # RFC 9421 §2.3 — Signature-Input is a Structured Field Dictionary whose
 # values carry a `keyid` parameter as a quoted string. Multiple sig
@@ -132,6 +132,155 @@ def ucp_agent_profile_url(
         return None
     match = _UCP_AGENT_PROFILE_RE.search(raw)
     return match.group(1) if match else None
+
+
+# RFC 7235 / RFC 6750 / RFC 9728 — WWW-Authenticate Bearer challenge.
+# Auth-params we care about for analytics: realm (always recommended),
+# error, error_description, scope (RFC 6750 §3), and resource_metadata
+# (RFC 9728).
+#
+# Both auth-scheme names and auth-param keys are RFC 7230 `token`s.
+# `tchar` is much broader than \w — crucially it includes `-`, so
+# hyphenated scheme names like `Mutual-Auth` or `New-Scheme` are
+# valid. Using \w would misclassify hyphenated schemes as auth-param
+# continuations of the prior challenge, leaking their params (e.g.
+# `realm`) into the Bearer dict.
+_TCHAR_RE = r"[A-Za-z0-9!#$%&'*+\-.^_`|~]"
+
+# RFC 7235 §2.1 — auth-param = token BWS "=" BWS ( token / quoted-string )
+# Both value forms are legal and senders use both. RFC 6750 §3's
+# canonical examples ship `error` as a bare token (`error=invalid_token`,
+# `error=insufficient_scope`) rather than a quoted string. A
+# quoted-string-only regex silently drops those, leaving
+# auth_challenge_error NULL on the most common challenge shape — and
+# `error` is the failure-funnel dimension we most care about. The
+# value branches into two capture groups: group 2 is the quoted form
+# (with `[^"]*`-style content), group 3 is the bare-token form
+# (tchar+); callers pick whichever matched.
+_AUTH_PARAM_RE = re.compile(rf'({_TCHAR_RE}+)\s*=\s*(?:"([^"]*)"|({_TCHAR_RE}+))')
+
+# Auth-scheme name token at the start of a challenge: a token followed
+# by whitespace (params follow) or end-of-segment (token68 / no-params).
+_SCHEME_TOKEN_RE = re.compile(rf"({_TCHAR_RE}+)(?:\s+|$)")
+
+
+def _split_challenges(value: str) -> list:
+    """Split a WWW-Authenticate value into (scheme, params_str) tuples.
+
+    RFC 7235 §4.1 allows multiple challenges separated by commas, and
+    auth-params within a challenge are also comma-separated — the
+    disambiguator is that schemes are bare tokens while auth-params
+    have ``=``. We do a quoted-string-aware comma split first, then
+    classify each comma-separated segment as either a new challenge
+    or an auth-param continuation of the previous challenge.
+
+    Classification: a segment whose leading token is followed by
+    ``=`` (with optional surrounding BWS per RFC 7230 §3.2.3) is an
+    auth-param continuation; otherwise it is a new challenge. We
+    can NOT key off "token + whitespace" alone — RFC 7235 §2.1 lets
+    auth-params be written as ``token BWS "=" BWS value``, so
+    forms like ``error = "invalid_token"`` would otherwise be
+    misclassified as a new ``error`` scheme and dropped from the
+    Bearer dict.
+
+    Quoted strings are respected — a comma inside ``"..."`` is part of
+    the value, not a separator. We don't fully implement RFC 7230
+    backslash-escape handling inside quoted strings since UCP-shaped
+    servers don't ship escaped quotes in auth-param values.
+    """
+    # Pre-pass: find comma positions that aren't inside a quoted string.
+    in_quote = False
+    comma_positions = []
+    for i, c in enumerate(value):
+        if c == '"':
+            in_quote = not in_quote
+        elif c == "," and not in_quote:
+            comma_positions.append(i)
+    starts = [0] + [c + 1 for c in comma_positions]
+    ends = comma_positions + [len(value)]
+
+    challenges: list = []
+    current_scheme: Optional[str] = None
+    current_params_segments: list = []
+    for start, end in zip(starts, ends):
+        segment = value[start:end].strip()
+        if not segment:
+            continue
+        scheme_match = _SCHEME_TOKEN_RE.match(segment)
+        is_new_challenge = False
+        if scheme_match:
+            # The token-followed-by-whitespace shape is ambiguous:
+            # `Bearer realm="x"` is a new challenge, but
+            # `error = "invalid_token"` is an auth-param continuation
+            # because RFC 7235 §2.1 allows BWS around the `=`. Look
+            # past any whitespace to the next non-space char — if it
+            # is `=`, this is an auth-param, not a scheme.
+            rest_after_token = segment[scheme_match.end() :].lstrip()
+            if not rest_after_token.startswith("="):
+                is_new_challenge = True
+        if is_new_challenge:
+            if current_scheme is not None:
+                challenges.append((current_scheme, ", ".join(current_params_segments)))
+            current_scheme = scheme_match.group(1)
+            rest = segment[scheme_match.end() :].strip()
+            current_params_segments = [rest] if rest else []
+        else:
+            # Auth-param continuation of the current challenge.
+            if current_scheme is not None:
+                current_params_segments.append(segment)
+    if current_scheme is not None:
+        challenges.append((current_scheme, ", ".join(current_params_segments)))
+    return challenges
+
+
+def parse_bearer_challenge(
+    headers: Optional[Mapping[str, str]],
+) -> Dict[str, str]:
+    """Parse the auth-params of the first Bearer challenge in WWW-Authenticate.
+
+    Returns a dict of ``{param_name: value}`` (lowercased keys) for the
+    auth-params on the first Bearer scheme found in the header. Both
+    value forms permitted by RFC 7235 §2.1 are accepted —
+    ``auth-param = token BWS "=" BWS ( token / quoted-string )`` — so
+    ``error=invalid_token`` (token) and
+    ``realm="https://merchant.example"`` (quoted-string) both populate
+    the dict. BWS around ``=`` is also accepted. Returns an empty dict
+    if no ``WWW-Authenticate`` header is present or if it carries no
+    Bearer challenge.
+
+    Multi-challenge headers like
+    ``Bearer realm="a", scope="b", Basic realm="c"`` are split on
+    challenge boundaries first, so params from a following non-Bearer
+    challenge can NOT leak into the Bearer dict. Pinned by tests:
+    a Basic challenge alongside Bearer leaves Bearer's params
+    untouched. Auth-scheme detection uses RFC 7230 ``token`` syntax
+    (tchar+), so hyphenated schemes like ``Mutual-Auth`` or
+    ``New-Scheme`` are correctly recognized as scheme tokens rather
+    than swallowed as Bearer auth-param continuations.
+
+    Spec refs:
+      * RFC 7235 §2.1 — auth-param grammar (token / quoted-string, BWS)
+      * RFC 7235 §4.1 — challenge syntax and the multi-challenge form
+      * RFC 6750 §3 — Bearer auth-params (realm, error, error_description,
+        scope)
+      * RFC 9728 — resource_metadata pointer
+    """
+    raw = lookup_header(headers, "www-authenticate")
+    if not raw:
+        return {}
+    for scheme, params_str in _split_challenges(raw):
+        if scheme.lower() == "bearer":
+            params: Dict[str, str] = {}
+            for m in _AUTH_PARAM_RE.finditer(params_str):
+                # Lowercase the key for case-insensitive lookups; the
+                # spec treats auth-param names as case-insensitive.
+                # Group 2 is the quoted-string value; group 3 is the
+                # bare-token value. Exactly one of them is set per
+                # match (the regex's outer group is `(?:"..."|tok)`).
+                value = m.group(2) if m.group(2) is not None else m.group(3)
+                params[m.group(1).lower()] = value
+            return params
+    return {}
 
 
 def signature_keyid(headers: Optional[Mapping[str, str]]) -> Optional[str]:
