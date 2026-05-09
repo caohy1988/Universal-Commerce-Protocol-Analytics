@@ -53,6 +53,11 @@ BQ_SCHEMA_FIELDS = [
     ("webhook_timestamp", "TIMESTAMP", "NULLABLE"),
     # UCP-Agent profile URI (parsed; supersedes platform_profile_url)
     ("ucp_agent_profile_url", "STRING", "NULLABLE"),
+    # WWW-Authenticate Bearer challenge (RFC 7235 / RFC 6750 / RFC 9728)
+    ("auth_challenge_error", "STRING", "NULLABLE"),
+    ("auth_challenge_scope", "STRING", "NULLABLE"),
+    ("auth_challenge_realm", "STRING", "NULLABLE"),
+    ("auth_challenge_resource_metadata", "STRING", "NULLABLE"),
     # financial (spec total types: items_discount, subtotal, discount,
     # fulfillment, tax, fee, total)
     ("currency", "STRING", "NULLABLE"),

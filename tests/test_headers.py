@@ -10,6 +10,7 @@ from __future__ import annotations
 from ucp_analytics._headers import (
     is_signed,
     lookup_header,
+    parse_bearer_challenge,
     signature_keyid,
     ucp_agent_profile_url,
     webhook_id,
@@ -321,3 +322,305 @@ class TestUcpAgentProfileUrl:
         # Real profile URIs have paths and sometimes query strings.
         url = "https://platform.example/.well-known/ucp?v=2026-04-08"
         assert ucp_agent_profile_url({"UCP-Agent": f'profile="{url}"'}) == url
+
+
+class TestParseBearerChallenge:
+    """RFC 7235 / 6750 Bearer challenge parser. Returns a dict of
+    auth-params extracted from the first Bearer scheme. Used by C10
+    to populate auth_challenge_* analytics columns."""
+
+    def test_full_challenge_with_all_params(self):
+        # The shape RFC 9728 / OIDC-protected-resource issuers produce
+        # on a 401 against a scoped UCP endpoint.
+        header = (
+            'Bearer realm="https://merchant.example",'
+            ' error="insufficient_scope",'
+            ' error_description="The access token requires the user_admin scope",'
+            ' scope="dev.ucp.shopping.order:manage",'
+            ' resource_metadata="https://merchant.example/.well-known/oauth-protected-resource"'
+        )
+        params = parse_bearer_challenge({"WWW-Authenticate": header})
+        assert params["realm"] == "https://merchant.example"
+        assert params["error"] == "insufficient_scope"
+        assert (
+            params["error_description"]
+            == "The access token requires the user_admin scope"
+        )
+        assert params["scope"] == "dev.ucp.shopping.order:manage"
+        assert (
+            params["resource_metadata"]
+            == "https://merchant.example/.well-known/oauth-protected-resource"
+        )
+
+    def test_realm_only_invalid_token(self):
+        # Bare 401 with just a realm — common pre-OAuth-flow case.
+        params = parse_bearer_challenge(
+            {"WWW-Authenticate": 'Bearer realm="https://merchant.example"'}
+        )
+        assert params == {"realm": "https://merchant.example"}
+
+    def test_invalid_token_error(self):
+        params = parse_bearer_challenge(
+            {
+                "WWW-Authenticate": (
+                    'Bearer realm="https://merchant.example", error="invalid_token"'
+                )
+            }
+        )
+        assert params["error"] == "invalid_token"
+
+    def test_case_insensitive_scheme(self):
+        # RFC 7235 treats the auth-scheme as case-insensitive.
+        params = parse_bearer_challenge(
+            {"www-authenticate": 'BEARER realm="x", error="invalid_token"'}
+        )
+        assert params == {"realm": "x", "error": "invalid_token"}
+
+    def test_case_insensitive_param_keys(self):
+        # The spec also treats auth-param names as case-insensitive;
+        # we lowercase keys for stable downstream lookup.
+        params = parse_bearer_challenge(
+            {"WWW-Authenticate": 'Bearer Realm="x", ERROR="invalid_token"'}
+        )
+        assert params == {"realm": "x", "error": "invalid_token"}
+
+    def test_basic_only_returns_empty(self):
+        # No Bearer scheme present.
+        params = parse_bearer_challenge({"WWW-Authenticate": 'Basic realm="merchant"'})
+        assert params == {}
+
+    def test_no_www_authenticate_header(self):
+        assert parse_bearer_challenge({"content-type": "text/plain"}) == {}
+
+    def test_none_headers(self):
+        assert parse_bearer_challenge(None) == {}
+
+    def test_empty_header_value(self):
+        assert parse_bearer_challenge({"WWW-Authenticate": ""}) == {}
+
+    def test_bearer_followed_by_basic_does_not_leak_basic_params(self):
+        # Bearer is the first scheme in a multi-scheme value. Bearer's
+        # params must be isolated — a following non-Bearer challenge's
+        # params (here Basic's `realm`) must NOT leak into the Bearer
+        # result. Without this, a sender that ships
+        # `Bearer error="invalid_token", Basic realm="login"` would
+        # corrupt the auth_challenge_realm column with the Basic realm
+        # value, breaking the failure-side identity-linking funnel.
+        params = parse_bearer_challenge(
+            {"WWW-Authenticate": 'Bearer error="invalid_token", Basic realm="x"'}
+        )
+        assert params == {"error": "invalid_token"}
+        assert "realm" not in params
+
+    def test_bearer_with_realm_followed_by_basic(self):
+        # Reviewer's repro from the C10 PR thread: Bearer with realm and
+        # error, followed by Basic with its own realm. Bearer's realm
+        # must win.
+        params = parse_bearer_challenge(
+            {
+                "WWW-Authenticate": (
+                    'Bearer realm="merchant", error="invalid_token", '
+                    'Basic realm="login"'
+                )
+            }
+        )
+        assert params == {"realm": "merchant", "error": "invalid_token"}
+
+    def test_bearer_after_basic_still_extracted(self):
+        # Bearer doesn't have to be the first challenge.
+        params = parse_bearer_challenge(
+            {
+                "WWW-Authenticate": (
+                    'Basic realm="legacy", '
+                    'Bearer realm="merchant", error="insufficient_scope"'
+                )
+            }
+        )
+        assert params == {
+            "realm": "merchant",
+            "error": "insufficient_scope",
+        }
+
+    def test_hyphenated_scheme_does_not_leak_params_into_bearer(self):
+        # RFC 7235 auth-scheme is an RFC 7230 `token`, whose `tchar`
+        # set includes `-`. A scheme like `New-Scheme` or `Mutual-Auth`
+        # is therefore valid. With a `\w+`-only scheme detector, the
+        # following challenge would be misclassified as an auth-param
+        # continuation of Bearer and its `realm="other"` would
+        # overwrite Bearer's `realm="merchant"`, corrupting the
+        # auth_challenge_realm KPI on a 401 response. Reviewer's repro
+        # from the C10 PR thread.
+        params = parse_bearer_challenge(
+            {"www-authenticate": ('Bearer realm="merchant", New-Scheme realm="other"')}
+        )
+        assert params == {"realm": "merchant"}
+
+    def test_hyphenated_scheme_after_bearer_with_multiple_params(self):
+        # Same shape as above but with more Bearer params, to make sure
+        # the hyphenated-scheme boundary still terminates Bearer cleanly
+        # rather than absorbing the trailing challenge as a pile of
+        # extra continuations.
+        params = parse_bearer_challenge(
+            {
+                "www-authenticate": (
+                    'Bearer realm="merchant", error="invalid_token", '
+                    'Mutual-Auth realm="other", token="x"'
+                )
+            }
+        )
+        assert params == {"realm": "merchant", "error": "invalid_token"}
+
+    def test_bearer_after_hyphenated_scheme_still_extracted(self):
+        # Bearer is the second challenge here; the first is hyphenated.
+        # The hyphenated leading scheme must not eat the entire value.
+        params = parse_bearer_challenge(
+            {
+                "www-authenticate": (
+                    'Mutual-Auth realm="other", '
+                    'Bearer realm="merchant", scope="dev.ucp.shopping.order:read"'
+                )
+            }
+        )
+        assert params == {
+            "realm": "merchant",
+            "scope": "dev.ucp.shopping.order:read",
+        }
+
+    def test_auth_param_with_bws_around_equals(self):
+        # RFC 7235 §2.1: auth-param = token BWS "=" BWS ( token /
+        # quoted-string ). BWS is "bad whitespace" — optional
+        # whitespace permitted but discouraged, recipients MUST accept
+        # it. A naive splitter that classifies any "token + whitespace"
+        # segment as a new scheme would treat `error = "invalid_token"`
+        # as a bogus `error` scheme and silently drop it from the Bearer
+        # dict, underpopulating the most useful auth_challenge_*
+        # columns on perfectly valid headers.
+        params = parse_bearer_challenge(
+            {
+                "www-authenticate": (
+                    'Bearer realm="merchant", error = "invalid_token", '
+                    'scope="dev.ucp.shopping.order:manage"'
+                )
+            }
+        )
+        assert params == {
+            "realm": "merchant",
+            "error": "invalid_token",
+            "scope": "dev.ucp.shopping.order:manage",
+        }
+
+    def test_resource_metadata_with_bws_around_equals(self):
+        # The reviewer's other repro shape — `resource_metadata` is
+        # the C10 column most commonly affected because the URL value
+        # is long and senders that pretty-print headers often add
+        # spaces around `=` for readability.
+        params = parse_bearer_challenge(
+            {
+                "www-authenticate": (
+                    'Bearer realm="merchant", '
+                    "resource_metadata = "
+                    '"https://merchant.example/.well-known/oauth-protected-resource"'
+                )
+            }
+        )
+        assert params == {
+            "realm": "merchant",
+            "resource_metadata": (
+                "https://merchant.example/.well-known/oauth-protected-resource"
+            ),
+        }
+
+    def test_bws_only_before_equals(self):
+        # BWS is allowed on either side independently — pin the
+        # asymmetric form.
+        params = parse_bearer_challenge(
+            {"www-authenticate": 'Bearer realm ="merchant", error= "invalid_token"'}
+        )
+        assert params == {"realm": "merchant", "error": "invalid_token"}
+
+    def test_token_form_error_value(self):
+        # RFC 7235 §2.1: auth-param value can be either token or
+        # quoted-string. RFC 6750 §3's canonical examples ship `error`
+        # as a bare token (`error=invalid_token`,
+        # `error=insufficient_scope`) rather than a quoted string. A
+        # quoted-only parser silently leaves auth_challenge_error NULL
+        # on those — exactly the failure-funnel dimension we most care
+        # about. Reviewer's repro for the C10 PR thread.
+        params = parse_bearer_challenge(
+            {
+                "www-authenticate": (
+                    'Bearer realm="merchant", error=invalid_token, scope="a b"'
+                )
+            }
+        )
+        assert params == {
+            "realm": "merchant",
+            "error": "invalid_token",
+            "scope": "a b",
+        }
+
+    def test_token_form_error_with_bws(self):
+        # Token-form value combined with BWS around `=` — the two
+        # spec-permitted relaxations stacked together.
+        params = parse_bearer_challenge(
+            {
+                "www-authenticate": (
+                    'Bearer realm="merchant", error = insufficient_scope'
+                )
+            }
+        )
+        assert params == {
+            "realm": "merchant",
+            "error": "insufficient_scope",
+        }
+
+    def test_token_form_realm_and_quoted_scope(self):
+        # All-token vs all-quoted edge: realm is bare token, scope is
+        # quoted (must be — the value contains a space). Pin that
+        # mixed forms within one challenge work.
+        params = parse_bearer_challenge(
+            {"www-authenticate": 'Bearer realm=merchant, scope="a b"'}
+        )
+        assert params == {"realm": "merchant", "scope": "a b"}
+
+    def test_token_form_does_not_eat_following_challenge(self):
+        # Bare-token value greediness must stop at non-tchar chars
+        # (whitespace, comma). Without that, `error=invalid_token`
+        # could swallow the trailing `, Basic realm="x"` and pollute
+        # the Bearer dict.
+        params = parse_bearer_challenge(
+            {
+                "www-authenticate": (
+                    'Bearer realm="merchant", error=invalid_token, Basic realm="legacy"'
+                )
+            }
+        )
+        assert params == {"realm": "merchant", "error": "invalid_token"}
+
+    def test_quoted_string_with_comma_not_split(self):
+        # A comma inside a quoted-string value is part of the value,
+        # not a separator. Without quote-aware splitting we'd treat
+        # `"manage, read"` as ending the Bearer challenge.
+        params = parse_bearer_challenge(
+            {
+                "WWW-Authenticate": (
+                    'Bearer realm="merchant", '
+                    'scope="dev.ucp.shopping.order:manage, read", '
+                    'error="insufficient_scope"'
+                )
+            }
+        )
+        assert params["scope"] == "dev.ucp.shopping.order:manage, read"
+        assert params["error"] == "insufficient_scope"
+
+    def test_scope_with_multiple_oauth_scopes(self):
+        # OAuth scopes are space-separated within a single quoted-string.
+        header = (
+            'Bearer realm="x", '
+            'scope="dev.ucp.shopping.order:read dev.ucp.shopping.order:manage"'
+        )
+        params = parse_bearer_challenge({"WWW-Authenticate": header})
+        assert (
+            params["scope"]
+            == "dev.ucp.shopping.order:read dev.ucp.shopping.order:manage"
+        )

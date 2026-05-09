@@ -162,6 +162,19 @@ class UCPEvent:
     # business → platform webhook flows.
     ucp_agent_profile_url: Optional[str] = None
 
+    # --- WWW-Authenticate Bearer challenge (RFC 7235 / RFC 6750) ---
+    # Captured from the response side on auth-failure rows. realm is
+    # the protected-resource identifier; error is the challenge code
+    # (e.g. invalid_token, insufficient_scope); scope is the required
+    # OAuth 2.0 scope string; resource_metadata is the RFC 9728
+    # pointer to OAuth protected-resource metadata. The set of fields
+    # actually populated depends on what the issuer sent — the helper
+    # only writes a column when the param is present.
+    auth_challenge_error: Optional[str] = None
+    auth_challenge_scope: Optional[str] = None
+    auth_challenge_realm: Optional[str] = None
+    auth_challenge_resource_metadata: Optional[str] = None
+
     # --- financial (minor units / cents, spec total types) ---
     currency: Optional[str] = None
     items_discount_amount: Optional[int] = None
