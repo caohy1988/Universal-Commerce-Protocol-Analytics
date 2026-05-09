@@ -110,11 +110,13 @@ class TestAsyncBigQueryWriter:
         with patch("asyncio.to_thread", side_effect=lambda fn, *a: fn(*a)):
             # batch_size=3, but we already have 3 so flush manually
             writer._buffer.clear()
-            writer._buffer.extend([
-                {"event_id": "1", "event_type": "test"},
-                {"event_id": "2", "event_type": "test"},
-                {"event_id": "3", "event_type": "test"},
-            ])
+            writer._buffer.extend(
+                [
+                    {"event_id": "1", "event_type": "test"},
+                    {"event_id": "2", "event_type": "test"},
+                    {"event_id": "3", "event_type": "test"},
+                ]
+            )
             await writer.flush()
 
         # Only rows at index 0 and 2 should be re-queued
@@ -153,3 +155,14 @@ class TestGetDDL:
         ddl = get_ddl("p", "d", "t")
         assert "INT64" in ddl
         assert "FLOAT64" in ddl
+
+    def test_eligibility_outcome_columns_present(self):
+        """A5 — pin that all three eligibility outcome BOOL columns
+        are emitted into the DDL. Missing one of these would silently
+        drop the corresponding KPI on table creation; auto_create_table
+        would then succeed but downstream INSERTs would fail with
+        'no such column'."""
+        ddl = get_ddl("p", "d", "t")
+        assert "eligibility_accepted_present BOOL" in ddl
+        assert "eligibility_not_accepted_present BOOL" in ddl
+        assert "eligibility_invalid_present BOOL" in ddl

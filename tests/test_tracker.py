@@ -588,6 +588,81 @@ class TestRecordHttp:
         assert event.auth_challenge_realm == "x"
         assert event.auth_challenge_error == "insufficient_scope"
 
+    # ---- A5: eligibility verification outcome end-to-end ----
+
+    async def test_eligibility_accepted_flows_through_record_http(
+        self, tracker, mock_writer
+    ):
+        """End-to-end: a checkout response shipping
+        `eligibility_accepted` as an info-severity message populates
+        the trio on the UCPEvent. This pins the parser→event setattr
+        plumbing for the new fields, not just the parser unit."""
+        event = await tracker.record_http(
+            method="POST",
+            url="https://merchant.example.com/checkout-sessions",
+            status_code=201,
+            response_body={
+                "id": "chk_123",
+                "status": "ready_for_complete",
+                "messages": [
+                    {
+                        "type": "info",
+                        "code": "eligibility_accepted",
+                        "content": "Loyalty member discount applies",
+                    },
+                ],
+            },
+        )
+        assert event.eligibility_accepted_present is True
+        assert event.eligibility_not_accepted_present is False
+        assert event.eligibility_invalid_present is False
+
+    async def test_eligibility_invalid_flows_through_from_error_severity(
+        self, tracker, mock_writer
+    ):
+        """`eligibility_invalid` is canonically an error-severity code.
+        The cross-severity walk in the parser must populate the trio
+        from an error message, not just from info messages."""
+        event = await tracker.record_http(
+            method="POST",
+            url="https://merchant.example.com/checkout-sessions",
+            status_code=400,
+            response_body={
+                "messages": [
+                    {
+                        "type": "error",
+                        "code": "eligibility_invalid",
+                        "content": "Eligibility claim malformed",
+                    },
+                ],
+            },
+        )
+        assert event.eligibility_invalid_present is True
+        assert event.eligibility_accepted_present is False
+        assert event.eligibility_not_accepted_present is False
+        # Legacy first-error column remains populated from the same msg.
+        assert event.error_code == "eligibility_invalid"
+
+    async def test_no_eligibility_codes_leaves_trio_none(self, tracker, mock_writer):
+        """A checkout with no eligibility outcome code leaves all
+        three columns None — they're three-state nullable BOOLs and
+        NULL is the explicit 'verification did not surface' signal."""
+        event = await tracker.record_http(
+            method="POST",
+            url="https://merchant.example.com/checkout-sessions",
+            status_code=201,
+            response_body={
+                "id": "chk_123",
+                "status": "ready_for_complete",
+                "messages": [
+                    {"type": "info", "code": "tax_rounded_up"},
+                ],
+            },
+        )
+        assert event.eligibility_accepted_present is None
+        assert event.eligibility_not_accepted_present is None
+        assert event.eligibility_invalid_present is None
+
     async def test_webhook_headers_rejected_on_non_webhook_path(
         self, tracker, mock_writer
     ):
