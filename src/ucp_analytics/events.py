@@ -180,6 +180,13 @@ class UCPEvent:
     payment_handler_id: Optional[str] = None
     payment_instrument_type: Optional[str] = None
     payment_brand: Optional[str] = None
+    # Per-handler available_instruments registry sourced from
+    # body.ucp.payment_handlers[*].available_instruments (the
+    # handler-declaration site per payment_handler.json), not from
+    # body.payment.* (which is selected/submitted instruments). All
+    # handlers preserved with per-handler instrument arrays intact —
+    # downstream queries can pivot on handler id or instrument type.
+    payment_available_instruments_json: Optional[str] = None
 
     # --- capabilities & extensions ---
     ucp_version: Optional[str] = None
