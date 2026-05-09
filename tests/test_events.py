@@ -43,6 +43,31 @@ class TestUCPEvent:
         e2 = UCPEvent()
         assert e1.event_id != e2.event_id
 
+    def test_eligibility_outcome_fields_default_none(self):
+        """A5 — three-state nullable BOOL trio. Defaults to None so
+        rows that don't observe an eligibility outcome code don't
+        contribute a denominator (NULL ≠ FALSE in BigQuery COUNT)."""
+        event = UCPEvent()
+        assert event.eligibility_accepted_present is None
+        assert event.eligibility_not_accepted_present is None
+        assert event.eligibility_invalid_present is None
+        # And NULL fields stay out of the row entirely.
+        row = event.to_bq_row()
+        assert "eligibility_accepted_present" not in row
+        assert "eligibility_not_accepted_present" not in row
+        assert "eligibility_invalid_present" not in row
+
+    def test_eligibility_outcome_fields_serialize_when_set(self):
+        event = UCPEvent(
+            eligibility_accepted_present=True,
+            eligibility_not_accepted_present=False,
+            eligibility_invalid_present=False,
+        )
+        row = event.to_bq_row()
+        assert row["eligibility_accepted_present"] is True
+        assert row["eligibility_not_accepted_present"] is False
+        assert row["eligibility_invalid_present"] is False
+
 
 class TestEnums:
     def test_event_type_values(self):
