@@ -333,6 +333,9 @@ class UCPResponseParser:
         # --- ucp metadata envelope ---
         cls._extract_ucp_metadata(body.get("ucp"), result)
 
+        # --- payment_handlers registry from ucp metadata ---
+        cls._extract_payment_available_instruments(body.get("ucp"), result)
+
         # --- context (UCP request-body Context object) ---
         cls._extract_context_fields(body.get("context"), result)
 
@@ -448,6 +451,48 @@ class UCPResponseParser:
         eligibility = context.get("eligibility")
         if isinstance(eligibility, list) and eligibility:
             result["context_eligibility_json"] = json.dumps(eligibility, default=str)
+
+    @classmethod
+    def _extract_payment_available_instruments(
+        cls, ucp_meta: Any, result: Dict[str, Any]
+    ) -> None:
+        """Capture body.ucp.payment_handlers[*].available_instruments.
+
+        Spec source is `payment_handler.json` (the *handler declaration*
+        site) — distinct from `body.payment.*` which carries the selected
+        instrument on a checkout/order. Stored in full so downstream
+        queries can pivot on handler id or instrument type.
+
+        Handles both the array and dict-keyed registry shapes via
+        `_normalize_registry`, the same as capabilities. Handlers
+        without an `available_instruments` array are dropped from the
+        stored payload — keeping them would inflate the column with
+        empty entries that aren't useful for analytics.
+        """
+        if not isinstance(ucp_meta, dict):
+            return
+        handlers_raw = ucp_meta.get("payment_handlers")
+        if not handlers_raw:
+            return
+        handlers = cls._normalize_registry(handlers_raw)
+        # Preserve all handlers that actually declare an instrument
+        # registry; collapse the rest so the column reflects the
+        # "instruments offered" surface, not the handler list.
+        # Schema-tight: `available_instruments` is an array per
+        # payment_handler.json. A malformed truthy value (string,
+        # dict, etc.) would otherwise survive the truthy check and
+        # break dashboard JSON_QUERY_ARRAY assumptions on this column.
+        with_instruments = [
+            h
+            for h in handlers
+            if isinstance(h, dict)
+            and isinstance(h.get("available_instruments"), list)
+            and h["available_instruments"]
+        ]
+        if with_instruments:
+            result["payment_available_instruments_json"] = json.dumps(
+                with_instruments, default=str
+            )
 
     @classmethod
     def _extract_ucp_metadata(cls, ucp_meta: Any, result: Dict[str, Any]) -> None:
