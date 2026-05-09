@@ -30,7 +30,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
-from ucp_analytics._path_match import path_matches_marker
+from ucp_analytics._path_match import is_webhook_delivery, path_matches_marker
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +70,36 @@ class UCPAnalyticsMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
         self.tracker = tracker
 
+    def _accepts(self, path: str, request_headers: Any) -> bool:
+        """Decide whether to capture a request.
+
+        Two acceptance branches:
+          1. The path matches a known UCP marker segment
+             (`/checkout-sessions`, `/orders`, `/.well-known/ucp`, etc.)
+             OR an operator-configured webhook prefix on the tracker.
+          2. The request looks like a webhook delivery by headers
+             (Standard Webhooks `Webhook-Id` + `Webhook-Timestamp`),
+             routing on a platform-specific URL the operator did not
+             enumerate. UCP `order.md`: *"The URL format is
+             platform-specific."*
+
+        Configuration lives on the tracker (`tracker.webhook_path_prefixes`)
+        — a single source of truth, so an operator who configures a
+        platform's webhook prefix once gets it applied at every
+        integration that wraps the same tracker (server middleware,
+        agent-side HTTPX hook). Header-based detection has its own
+        suppression for known UCP REST paths (see
+        `_path_match.is_webhook_delivery`) so a buggy or malicious
+        sender can't stamp webhook headers onto `/checkout-sessions`
+        and falsely route into the order-webhook branch.
+        """
+        extras = tuple(getattr(self.tracker, "webhook_path_prefixes", ()) or ())
+        if any(
+            path_matches_marker(path, p) for p in (*self.UCP_PATH_PREFIXES, *extras)
+        ):
+            return True
+        return is_webhook_delivery(path, request_headers, extras)
+
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         path = request.url.path
 
@@ -79,7 +109,10 @@ class UCPAnalyticsMiddleware(BaseHTTPMiddleware):
         # like /ucp/v1, /api/v2, /merchant/api/ucp/v1, etc. Use a
         # segment-aware match so /api/catalogue/search doesn't trip the
         # /catalog marker and /api/orders-history doesn't trip /orders.
-        if not any(path_matches_marker(path, p) for p in self.UCP_PATH_PREFIXES):
+        # Header-based fallback (Standard Webhooks Webhook-Id +
+        # Webhook-Timestamp) catches platform-specific webhook URLs the
+        # operator hasn't enumerated.
+        if not self._accepts(path, request.headers):
             return await call_next(request)
 
         # Read request body (for POST/PUT)

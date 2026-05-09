@@ -47,6 +47,12 @@ class UCPEventType(str, Enum):
     ORDER_DELIVERED = "order_delivered"
     ORDER_RETURNED = "order_returned"
     ORDER_CANCELED = "order_canceled"
+    # Generic order-webhook receipt: emitted when a webhook delivery is
+    # detected (by configured path prefix or by Standard Webhooks
+    # headers) but the body carries no recognizable lifecycle status.
+    # Distinct from ORDER_UPDATED, which is for REST-driven order
+    # updates — pivoting taxonomy on URL format conflated those two.
+    ORDER_WEBHOOK_RECEIVED = "order_webhook_received"
 
     # Identity linking (OAuth 2.0)
     IDENTITY_LINK_INITIATED = "identity_link_initiated"
