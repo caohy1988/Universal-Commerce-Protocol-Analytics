@@ -20,6 +20,7 @@ from ucp_analytics._headers import (
     webhook_id,
     webhook_timestamp_iso,
 )
+from ucp_analytics._path_match import is_webhook_delivery
 from ucp_analytics.events import UCPEvent
 from ucp_analytics.parser import UCPResponseParser
 from ucp_analytics.writer import AsyncBigQueryWriter
@@ -68,6 +69,7 @@ class UCPAnalyticsTracker:
         redact_pii: bool = False,
         pii_fields: Optional[List[str]] = None,
         custom_metadata: Optional[Dict[str, str]] = None,
+        webhook_path_prefixes: Optional[List[str]] = None,
     ):
         self.app_name = app_name
         self.redact_pii = redact_pii
@@ -84,6 +86,14 @@ class UCPAnalyticsTracker:
             ]
         )
         self.custom_metadata = custom_metadata
+        # UCP order.md: "The URL format is platform-specific." The
+        # default `/webhook(s)` prefix lives inside is_webhook_delivery;
+        # operators on platforms that publish `/events`, `/ucp-events`,
+        # `/hooks/<id>`, etc. extend that set here. The header-based
+        # fallback (Webhook-Id + Webhook-Timestamp) catches deliveries
+        # even when the path is unknown, so this list is a
+        # noise-suppression knob more than a coverage knob.
+        self.webhook_path_prefixes: tuple = tuple(webhook_path_prefixes or ())
 
         self._writer = AsyncBigQueryWriter(
             project_id=project_id,
@@ -131,16 +141,30 @@ class UCPAnalyticsTracker:
         # Webhook flow; capturing them off arbitrary requests would let
         # a buggy or malicious sender stamp webhook metadata onto a
         # checkout / cart / catalog row.
-        is_webhook = "/webhook" in path
+        #
+        # is_webhook_delivery accepts either a default/configured path
+        # prefix OR the Standard Webhooks header pair (Webhook-Id +
+        # Webhook-Timestamp). The header pair is the strong signal --
+        # UCP order.md requires both on every order-event webhook --
+        # so a platform that publishes `/events` instead of `/webhooks`
+        # is still detected without the operator having to enumerate
+        # every variant.
+        is_webhook = is_webhook_delivery(
+            path, request_headers, self.webhook_path_prefixes
+        )
 
         # Classify (pass request_body for webhook flows where payload
-        # is in the request and response is just an ack)
+        # is in the request and response is just an ack). Forward the
+        # same webhook-detection signals so the classifier picks the
+        # ORDER_* taxonomy rather than falling through to REQUEST.
         event_type = UCPResponseParser.classify(
             method,
             path,
             status_code,
             response_body,
             request_body=request_body,
+            request_headers=request_headers,
+            webhook_path_prefixes=self.webhook_path_prefixes,
         )
 
         # Build event

@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
+from ucp_analytics._path_match import is_webhook_delivery
 from ucp_analytics.events import UCPEventType
 
 # A5 — Eligibility verification outcome codes. Per UCP `eligibility.md`,
@@ -48,8 +49,20 @@ class UCPResponseParser:
         status_code: int,
         response_body: Optional[dict],
         request_body: Optional[dict] = None,
+        request_headers: Optional[Mapping[str, str]] = None,
+        webhook_path_prefixes: Iterable[str] = (),
     ) -> UCPEventType:
-        """Derive the UCP event type from the HTTP request + response."""
+        """Derive the UCP event type from the HTTP request + response.
+
+        ``request_headers`` and ``webhook_path_prefixes`` widen webhook
+        detection beyond the default `/webhook(s)` prefix so platforms
+        that advertise `order.config.webhook_url` as `/events`,
+        `/ucp-events`, `/hooks/<id>`, etc. (per UCP `order.md`,
+        ``"The URL format is platform-specific"``) still classify as
+        order-webhook deliveries. Optional with backwards-compatible
+        defaults so direct callers and existing tests don't have to
+        thread them.
+        """
         m = method.upper()
         p = path.rstrip("/")
 
@@ -129,40 +142,59 @@ class UCPResponseParser:
                     return UCPEventType.ORDER_CANCELED
             return UCPEventType.ORDER_UPDATED
 
-        # Webhook paths for order lifecycle
-        # Upstream: POST /webhooks/partners/{partner_id}/events/order
-        if re.search(r"/webhooks?/", p):
-            # Webhook errors should still classify as errors
+        # Order webhook detection. UCP `order.md` says the URL format
+        # is platform-specific, so we can't rely on a fixed `/webhooks`
+        # prefix. Two signals enter this branch:
+        #   1. Path matches `/webhook(s)` or any operator-configured
+        #      `webhook_path_prefixes` — for path-aware deployments.
+        #   2. Standard Webhooks `Webhook-Id` + `Webhook-Timestamp`
+        #      headers are both present — for header-aware fallback
+        #      regardless of URL. UCP `order.md` requires both on
+        #      every order-event webhook.
+        # Either alone is sufficient; together they're the same branch.
+        if is_webhook_delivery(p, request_headers, webhook_path_prefixes):
+            # Webhook errors still classify as errors.
             if status_code and status_code >= 400:
                 return UCPEventType.ERROR
-            # Check for upstream partner webhook format
-            # Payload is in the request body; response is just ack
-            if re.search(r"/webhooks?/partners/[^/]+/events/order", p):
-                body = (
-                    request_body
-                    if request_body and isinstance(request_body, dict)
-                    else response_body
-                )
-                if body and isinstance(body, dict):
-                    order_status = body.get("status", "")
-                    if order_status == "shipped":
-                        return UCPEventType.ORDER_SHIPPED
-                    if order_status == "delivered":
-                        return UCPEventType.ORDER_DELIVERED
-                    if order_status == "returned":
-                        return UCPEventType.ORDER_RETURNED
-                    if order_status in ("canceled", "cancelled"):
-                        return UCPEventType.ORDER_CANCELED
-                return UCPEventType.ORDER_UPDATED
-            # Legacy: /webhooks/order-delivered etc.
-            if re.search(r"/webhooks?/order[_-]delivered", p):
+            # Lifecycle event types are derived from the *payload*, not
+            # the URL — the issue #8 B5b directive: "we don't pivot
+            # taxonomy on URL format". Webhooks ship the order body in
+            # the request, with a small ack in the response.
+            body = (
+                request_body
+                if request_body and isinstance(request_body, dict)
+                else response_body
+            )
+            if body and isinstance(body, dict):
+                order_status = body.get("status", "")
+                if order_status == "shipped":
+                    return UCPEventType.ORDER_SHIPPED
+                if order_status == "delivered":
+                    return UCPEventType.ORDER_DELIVERED
+                if order_status == "returned":
+                    return UCPEventType.ORDER_RETURNED
+                if order_status in ("canceled", "cancelled"):
+                    return UCPEventType.ORDER_CANCELED
+            # Legacy URL-segment fallback for senders that don't
+            # include status in the body. Kept for back-compat with
+            # platforms that still publish `/webhooks/order-delivered`-
+            # style URLs; the body-driven path above takes precedence
+            # so a sender that includes status overrides the URL
+            # heuristic.
+            if re.search(r"/order[_-]delivered", p):
                 return UCPEventType.ORDER_DELIVERED
-            if re.search(r"/webhooks?/order[_-]returned", p):
+            if re.search(r"/order[_-]returned", p):
                 return UCPEventType.ORDER_RETURNED
-            if re.search(r"/webhooks?/order[_-]canceled", p):
+            if re.search(r"/order[_-]canceled", p):
                 return UCPEventType.ORDER_CANCELED
-            # Generic webhook → treat as order update
-            return UCPEventType.ORDER_UPDATED
+            # Generic webhook receipt — body has no recognizable
+            # lifecycle status and URL has no segment hint.
+            # Distinct from ORDER_UPDATED (which is for REST-driven
+            # PUT /orders/{id}); analytics needs to tell those apart
+            # because they have different traffic shapes (webhooks
+            # are platform→business with signing; REST updates are
+            # business→platform).
+            return UCPEventType.ORDER_WEBHOOK_RECEIVED
 
         # Identity linking (strict: /identity, /oauth, or /oauth2 paths).
         # The trailing oauth2? in the regex is necessary because /oauth

@@ -209,3 +209,150 @@ class TestMiddlewareMultiValueResponseHeaders:
             response_headers["www-authenticate"]
             == 'Bearer realm="merchant", error="invalid_token"'
         )
+
+
+class TestMiddlewareWebhookPathPrefixes:
+    """B5b — UCP order.md says webhook URL format is platform-specific.
+    Configuration lives on the tracker (`tracker.webhook_path_prefixes`)
+    so a single source of truth applies to capture (middleware path
+    filter) AND classification (tracker / parser). Without that, the
+    middleware would capture `/events` but the tracker would emit
+    event_type=request instead of order_*."""
+
+    @pytest.fixture
+    def mock_tracker(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        tracker = MagicMock()
+        tracker.record_http = AsyncMock()
+        tracker.register_pending_task = MagicMock()
+        # Default: no configured webhook prefixes. Per-test overrides
+        # set this explicitly to simulate operator configuration.
+        tracker.webhook_path_prefixes = ()
+        return tracker
+
+    def test_default_prefixes_skip_events_path(self, mock_tracker):
+        """Without operator config, `/events` is not a UCP path —
+        the middleware skips it entirely (zero overhead, no
+        record_http call)."""
+        from starlette.applications import Starlette
+        from starlette.responses import JSONResponse
+        from starlette.routing import Route
+        from starlette.testclient import TestClient
+
+        from ucp_analytics.middleware import UCPAnalyticsMiddleware
+
+        async def handler(request):
+            return JSONResponse({"ok": True})
+
+        app = Starlette(routes=[Route("/events", handler, methods=["POST"])])
+        app.add_middleware(UCPAnalyticsMiddleware, tracker=mock_tracker)
+
+        with TestClient(app) as client:
+            client.post("/events", json={"id": "order_x", "status": "shipped"})
+
+        mock_tracker.record_http.assert_not_awaited()
+
+    def test_tracker_configured_prefix_captures_events_path(self, mock_tracker):
+        """With `tracker.webhook_path_prefixes=('/events',)`, the
+        middleware accepts the path and flows into record_http."""
+        from starlette.applications import Starlette
+        from starlette.responses import JSONResponse
+        from starlette.routing import Route
+        from starlette.testclient import TestClient
+
+        from ucp_analytics.middleware import UCPAnalyticsMiddleware
+
+        mock_tracker.webhook_path_prefixes = ("/events",)
+
+        async def handler(request):
+            return JSONResponse({"ok": True})
+
+        app = Starlette(routes=[Route("/events", handler, methods=["POST"])])
+        app.add_middleware(UCPAnalyticsMiddleware, tracker=mock_tracker)
+
+        with TestClient(app) as client:
+            client.post("/events", json={"id": "order_x", "status": "shipped"})
+
+        mock_tracker.record_http.assert_awaited_once()
+        call_kwargs = mock_tracker.record_http.call_args.kwargs
+        assert call_kwargs["path"] == "/events"
+
+    def test_tracker_configured_prefix_handles_mounted_path(self, mock_tracker):
+        """Tracker-configured `/events` works under a mount, same as
+        the default UCP markers."""
+        from starlette.applications import Starlette
+        from starlette.responses import JSONResponse
+        from starlette.routing import Route
+        from starlette.testclient import TestClient
+
+        from ucp_analytics.middleware import UCPAnalyticsMiddleware
+
+        mock_tracker.webhook_path_prefixes = ("/events",)
+
+        async def handler(request):
+            return JSONResponse({"ok": True})
+
+        app = Starlette(routes=[Route("/api/v1/events", handler, methods=["POST"])])
+        app.add_middleware(UCPAnalyticsMiddleware, tracker=mock_tracker)
+
+        with TestClient(app) as client:
+            client.post("/api/v1/events", json={"id": "order_x", "status": "delivered"})
+
+        mock_tracker.record_http.assert_awaited_once()
+
+    def test_header_pair_captures_unknown_path(self, mock_tracker):
+        """Reviewer's High #1 repro: a `/events` request carrying
+        Standard Webhooks `Webhook-Id` + `Webhook-Timestamp` headers
+        must be captured even when no operator prefix is configured.
+        Without this fallback in the middleware's capture gate,
+        header-based webhook detection inside the tracker / classifier
+        never gets a chance to fire — the request is skipped at the
+        path filter."""
+        from starlette.applications import Starlette
+        from starlette.responses import JSONResponse
+        from starlette.routing import Route
+        from starlette.testclient import TestClient
+
+        from ucp_analytics.middleware import UCPAnalyticsMiddleware
+
+        async def handler(request):
+            return JSONResponse({"ok": True})
+
+        app = Starlette(routes=[Route("/events", handler, methods=["POST"])])
+        app.add_middleware(UCPAnalyticsMiddleware, tracker=mock_tracker)
+
+        with TestClient(app) as client:
+            client.post(
+                "/events",
+                json={"id": "order_x", "status": "delivered"},
+                headers={
+                    "Webhook-Id": "evt_42",
+                    "Webhook-Timestamp": "1767225600",
+                },
+            )
+
+        mock_tracker.record_http.assert_awaited_once()
+
+    def test_header_pair_does_not_capture_unrelated_path(self, mock_tracker):
+        """Header-based capture must stay scoped: a request to an
+        unrelated /api/foo path WITHOUT webhook headers stays
+        skipped. Pin this to make sure the new acceptance branch
+        doesn't accidentally widen capture beyond UCP+webhook."""
+        from starlette.applications import Starlette
+        from starlette.responses import JSONResponse
+        from starlette.routing import Route
+        from starlette.testclient import TestClient
+
+        from ucp_analytics.middleware import UCPAnalyticsMiddleware
+
+        async def handler(request):
+            return JSONResponse({"ok": True})
+
+        app = Starlette(routes=[Route("/api/foo", handler, methods=["POST"])])
+        app.add_middleware(UCPAnalyticsMiddleware, tracker=mock_tracker)
+
+        with TestClient(app) as client:
+            client.post("/api/foo", json={})
+
+        mock_tracker.record_http.assert_not_awaited()

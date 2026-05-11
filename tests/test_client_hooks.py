@@ -289,3 +289,61 @@ class TestUCPClientEventHookPathFiltering:
         )
         await hook(resp)
         mock_tracker.record_http.assert_not_awaited()
+
+
+class TestUCPClientEventHookWebhookPathPrefixes:
+    """B5b — agents that themselves receive webhooks from a partner
+    platform may need the HTTPX client hook to widen capture beyond
+    the default `/webhook(s)` markers. Configuration lives on the
+    tracker (single source of truth, applied uniformly to capture and
+    classification)."""
+
+    @pytest.fixture
+    def mock_tracker(self):
+        tracker = MagicMock()
+        tracker.record_http = AsyncMock()
+        tracker.webhook_path_prefixes = ()
+        return tracker
+
+    async def test_default_skips_events_path(self, mock_tracker):
+        """Without operator config, `/events` is not captured."""
+        hook = UCPClientEventHook(mock_tracker)
+        resp = _make_response(
+            url="https://platform.example.com/events",
+            method="POST",
+            status_code=200,
+            json_body={"ok": True},
+        )
+        await hook(resp)
+        mock_tracker.record_http.assert_not_awaited()
+
+    async def test_tracker_configured_prefix_captures_events_path(self, mock_tracker):
+        mock_tracker.webhook_path_prefixes = ("/events",)
+        hook = UCPClientEventHook(mock_tracker)
+        resp = _make_response(
+            url="https://platform.example.com/events",
+            method="POST",
+            status_code=200,
+            json_body={"ok": True},
+        )
+        await hook(resp)
+        mock_tracker.record_http.assert_awaited_once()
+
+    async def test_header_pair_captures_unknown_path(self, mock_tracker):
+        """Reviewer's High #1 mirror for the agent-side hook: a
+        webhook delivered to the agent at an unknown URL carrying
+        Standard Webhooks header pair must be captured even without
+        operator-configured prefixes."""
+        hook = UCPClientEventHook(mock_tracker)
+        resp = _make_response(
+            url="https://agent.example.com/hooks/abc",
+            method="POST",
+            status_code=200,
+            json_body={"ok": True},
+            request_headers={
+                "Webhook-Id": "evt_42",
+                "Webhook-Timestamp": "1767225600",
+            },
+        )
+        await hook(resp)
+        mock_tracker.record_http.assert_awaited_once()

@@ -31,7 +31,7 @@ from typing import Any
 
 import httpx
 
-from ucp_analytics._path_match import path_matches_marker
+from ucp_analytics._path_match import is_webhook_delivery, path_matches_marker
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +63,24 @@ class UCPClientEventHook:
     def __init__(self, tracker: Any) -> None:
         self.tracker = tracker
 
+    def _accepts(self, path: str, request_headers: Any) -> bool:
+        """Decide whether to capture a response.
+
+        Mirrors `UCPAnalyticsMiddleware._accepts`. Two acceptance
+        branches: known UCP marker (incl. tracker-configured webhook
+        prefixes) OR Standard Webhooks header pair on a
+        platform-specific URL. Configuration lives on the tracker
+        (`tracker.webhook_path_prefixes`) so a single source of truth
+        applies to both the server middleware and this agent-side
+        hook when they wrap the same tracker.
+        """
+        extras = tuple(getattr(self.tracker, "webhook_path_prefixes", ()) or ())
+        if any(
+            path_matches_marker(path, p) for p in (*self.UCP_PATH_PATTERNS, *extras)
+        ):
+            return True
+        return is_webhook_delivery(path, request_headers, extras)
+
     async def __call__(self, response: httpx.Response) -> None:
         """Called by HTTPX after each response is received."""
         request = response.request
@@ -72,8 +90,10 @@ class UCPClientEventHook:
         # to the platform-advertised base endpoint, so a real merchant can
         # mount the marker segments under a prefix like /ucp/v1, /api/v2.
         # Use the segment-aware helper so /api/catalogue/search,
-        # /api/orders-history, etc. don't trip the filter.
-        if not any(path_matches_marker(path, p) for p in self.UCP_PATH_PATTERNS):
+        # /api/orders-history, etc. don't trip the filter. Header-based
+        # fallback (Standard Webhooks Webhook-Id + Webhook-Timestamp)
+        # catches platform-specific webhook URLs not in the path set.
+        if not self._accepts(path, request.headers):
             return
 
         # Read response body

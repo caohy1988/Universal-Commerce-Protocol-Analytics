@@ -705,6 +705,104 @@ class TestRecordHttp:
         assert event.webhook_id == "evt_upper"
         assert event.webhook_timestamp == "2026-01-01T00:00:00+00:00"
 
+    # ---- B5b: platform-provided webhook URLs + header fallback ----
+
+    async def test_webhook_headers_capture_on_unknown_path(self, tracker, mock_writer):
+        """A platform that publishes its webhook URL as `/hooks/<id>`
+        (not `/webhook(s)/...`) still flows through analytics correctly:
+        webhook_id / webhook_timestamp populate, classification routes
+        through ORDER_*, and is_webhook gating accepts the row."""
+        event = await tracker.record_http(
+            method="POST",
+            url="https://platform.example.com/hooks/abc-123",
+            status_code=200,
+            request_headers={
+                "Webhook-Id": "evt_42",
+                "Webhook-Timestamp": "1767225600",
+            },
+            request_body={
+                "id": "order_xyz",
+                "checkout_id": "chk_a",
+                "status": "shipped",
+            },
+        )
+        # webhook_id captured even though path is non-default.
+        assert event.webhook_id == "evt_42"
+        assert event.webhook_timestamp == "2026-01-01T00:00:00+00:00"
+        # Classification routed via the body status.
+        assert event.event_type == "order_shipped"
+
+    async def test_configured_webhook_path_prefix(self, mock_writer):
+        """An operator can pass webhook_path_prefixes at construction
+        so a platform that publishes `/events` as its webhook URL gets
+        captured without the operator having to rely on the header
+        fallback alone (helpful when senders batch deliveries without
+        per-request Webhook-Id)."""
+        tracker = UCPAnalyticsTracker(
+            project_id="test",
+            app_name="test_app",
+            webhook_path_prefixes=["/events", "/ucp-events"],
+        )
+        event = await tracker.record_http(
+            method="POST",
+            url="https://platform.example.com/events",
+            status_code=200,
+            request_body={
+                "id": "order_xyz",
+                "checkout_id": "chk_a",
+                "status": "delivered",
+            },
+        )
+        assert event.event_type == "order_delivered"
+        # is_webhook fires from the configured prefix → request body
+        # used for extraction (not response). order_id is derived
+        # because the body shape (id + checkout_id) is order-shaped.
+        assert event.order_id == "order_xyz"
+
+    async def test_webhook_headers_on_non_webhook_path_still_rejected(
+        self, tracker, mock_writer
+    ):
+        """B5b adds header-based webhook detection but MUST NOT weaken
+        the existing protection: webhook headers stamped on
+        /checkout-sessions still record nothing. The URL is
+        authoritative for known UCP REST endpoints; the header pair
+        only triggers fallback on unknown paths."""
+        event = await tracker.record_http(
+            method="POST",
+            url="https://merchant.example.com/checkout-sessions",
+            status_code=201,
+            request_headers={
+                "Webhook-Id": "evt_definitely_not_a_webhook",
+                "Webhook-Timestamp": "1767225600",
+            },
+            response_body={"id": "chk_xyz", "status": "ready_for_complete"},
+        )
+        # The C13 protection remains intact.
+        assert event.webhook_id is None
+        assert event.webhook_timestamp is None
+        # Classification stays on the REST taxonomy.
+        assert event.event_type == "checkout_session_created"
+
+    async def test_webhook_received_when_no_lifecycle_status(
+        self, tracker, mock_writer
+    ):
+        """Body-driven taxonomy: when a webhook is detected (by header
+        or path) but the body has no recognizable lifecycle status,
+        we emit ORDER_WEBHOOK_RECEIVED -- distinct from ORDER_UPDATED
+        (REST-driven). This keeps webhook traffic and REST traffic
+        separable in dashboards."""
+        event = await tracker.record_http(
+            method="POST",
+            url="https://platform.example.com/hooks/abc",
+            status_code=200,
+            request_headers={
+                "Webhook-Id": "evt_42",
+                "Webhook-Timestamp": "1767225600",
+            },
+            request_body={"id": "order_xyz"},  # no status
+        )
+        assert event.event_type == "order_webhook_received"
+
     async def test_response_body_overlays_request_body_on_conflict(
         self, tracker, mock_writer
     ):
