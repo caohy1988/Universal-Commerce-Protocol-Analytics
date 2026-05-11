@@ -546,6 +546,132 @@ class TestRecordHttp:
         assert event.response_signature_keyid is None
         assert event.response_signature_alg is None
 
+    # ---- A3: embedded checkout `ec_color_scheme` URL query param ----
+
+    async def test_ec_color_scheme_extracted_from_request_url(
+        self, tracker, mock_writer
+    ):
+        """The host appends `?ec_color_scheme=dark` to the embedded
+        checkout URL to request a theme. Pin that the column captures
+        the value as sent."""
+        event = await tracker.record_http(
+            method="GET",
+            url="https://merchant.example.com/embedded-checkout?ec_color_scheme=dark",
+            status_code=200,
+        )
+        assert event.embedded_ec_color_scheme == "dark"
+
+    async def test_ec_color_scheme_takes_first_value_when_repeated(
+        self, tracker, mock_writer
+    ):
+        """URLs can repeat a query key; we take the first value to
+        mirror how a web server would surface `request.args[k]`.
+        Senders that ship duplicates have a bug, but analytics
+        records what was *actually* requested (the first param a
+        right-most-wins parser would skip)."""
+        event = await tracker.record_http(
+            method="GET",
+            url=(
+                "https://merchant.example.com/embedded-checkout"
+                "?ec_color_scheme=light&ec_color_scheme=dark"
+            ),
+            status_code=200,
+        )
+        assert event.embedded_ec_color_scheme == "light"
+
+    async def test_ec_color_scheme_absent_leaves_column_none(
+        self, tracker, mock_writer
+    ):
+        """No `ec_color_scheme` param on the URL → column stays None.
+        The signal is "did the host request a theme", so absence is
+        meaningful."""
+        event = await tracker.record_http(
+            method="GET",
+            url="https://merchant.example.com/embedded-checkout",
+            status_code=200,
+        )
+        assert event.embedded_ec_color_scheme is None
+
+    async def test_ec_color_scheme_non_spec_value_recorded_as_sent(
+        self, tracker, mock_writer
+    ):
+        """Spec lists `light` / `dark`, but the param is host-
+        controlled. We record signal fidelity — non-spec values land
+        in the column rather than being normalized away, so analysts
+        can detect senders that ship typos / experimental themes."""
+        event = await tracker.record_http(
+            method="GET",
+            url=(
+                "https://merchant.example.com/embedded-checkout"
+                "?ec_color_scheme=high-contrast"
+            ),
+            status_code=200,
+        )
+        assert event.embedded_ec_color_scheme == "high-contrast"
+
+    async def test_ec_color_scheme_coexists_with_other_query_params(
+        self, tracker, mock_writer
+    ):
+        """Real embedded URLs carry several params (`cart_id`,
+        `session_id`, etc.). Pin that other params don't interfere
+        and `ec_color_scheme` is picked specifically — not just
+        the first param on the URL."""
+        event = await tracker.record_http(
+            method="GET",
+            url=(
+                "https://merchant.example.com/embedded-checkout"
+                "?cart_id=cart_abc&ec_color_scheme=dark&session_id=sess_123"
+            ),
+            status_code=200,
+        )
+        assert event.embedded_ec_color_scheme == "dark"
+
+    async def test_ec_color_scheme_extracted_from_path_when_url_absent(
+        self, tracker, mock_writer
+    ):
+        """record_http accepts both `url` and `path`; direct callers
+        often pass only `path` with a query string on it. The
+        extraction must read the query from whichever source carries
+        one — without this fallback the signal silently drops on
+        path-only callers. Reviewer's PR-22 repro."""
+        # Path-only, query string on path → captured.
+        event = await tracker.record_http(
+            method="GET",
+            path="/embedded-checkout?ec_color_scheme=dark",
+            status_code=200,
+        )
+        assert event.embedded_ec_color_scheme == "dark"
+
+    async def test_ec_color_scheme_none_when_path_has_no_query(
+        self, tracker, mock_writer
+    ):
+        """Path-only without a query string → column stays None.
+        Pins the negative side so the fallback path doesn't
+        accidentally invent a value."""
+        event = await tracker.record_http(
+            method="GET",
+            path="/embedded-checkout",
+            status_code=200,
+        )
+        assert event.embedded_ec_color_scheme is None
+
+    async def test_ec_color_scheme_url_wins_when_both_carry_query(
+        self, tracker, mock_writer
+    ):
+        """When both `url` and `path` are supplied and both carry a
+        query string, the `url`'s query wins. This matches the
+        existing precedence elsewhere in record_http where url-
+        derived values are authoritative — the caller's url is the
+        fully-qualified original, path is the deployment-resolved
+        derivative."""
+        event = await tracker.record_http(
+            method="GET",
+            url="https://merchant.example.com/checkout?ec_color_scheme=light",
+            path="/checkout?ec_color_scheme=dark",
+            status_code=200,
+        )
+        assert event.embedded_ec_color_scheme == "light"
+
     async def test_jwk_lookup_exception_swallowed(self, mock_writer):
         """A flaky JWKS source (network error, cache miss, etc.) must
         not take down the analytics row. Exception is caught, logged,

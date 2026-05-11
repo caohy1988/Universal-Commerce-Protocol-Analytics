@@ -68,6 +68,29 @@ class TestUCPEvent:
         assert row["eligibility_not_accepted_present"] is False
         assert row["eligibility_invalid_present"] is False
 
+    def test_embedded_checkout_fields_default_none(self):
+        """A3 — three embedded-checkout columns default None so rows
+        without discovery / query-param signals don't pollute KPIs."""
+        event = UCPEvent()
+        assert event.embedded_delegations_json is None
+        assert event.embedded_color_schemes_json is None
+        assert event.embedded_ec_color_scheme is None
+        row = event.to_bq_row()
+        assert "embedded_delegations_json" not in row
+        assert "embedded_color_schemes_json" not in row
+        assert "embedded_ec_color_scheme" not in row
+
+    def test_embedded_checkout_fields_serialize_when_set(self):
+        event = UCPEvent(
+            embedded_delegations_json='["navigate","submit_form"]',
+            embedded_color_schemes_json='["light","dark"]',
+            embedded_ec_color_scheme="dark",
+        )
+        row = event.to_bq_row()
+        assert row["embedded_delegations_json"] == '["navigate","submit_form"]'
+        assert row["embedded_color_schemes_json"] == '["light","dark"]'
+        assert row["embedded_ec_color_scheme"] == "dark"
+
     def test_signature_alg_fields_default_none(self):
         """C5c — per-direction algorithm columns default to None so
         rows without a configured jwk_lookup don't pollute the
