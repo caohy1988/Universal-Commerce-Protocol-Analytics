@@ -1600,6 +1600,826 @@ class TestWebhookClassification:
         assert result == UCPEventType.ORDER_DELIVERED
 
 
+class TestOrderLifecycleNewShape:
+    """B8 — at UCP order.md/c5c6139 the order has no top-level `status`.
+    Lifecycle moves into `fulfillment.events[]` (append-only shipment
+    log) and `adjustments[]` (post-order refunds / returns / disputes
+    / cancellations). The classifier must derive ORDER_* event types
+    from these arrays, not from the now-absent flat field."""
+
+    def _new_shape_order(self, fulfillment_events=None, adjustments=None):
+        """Build a c5c6139-shaped order body."""
+        body = {
+            "id": "order_xyz",
+            "checkout_id": "chk_a",
+            "line_items": [],
+            "fulfillment": {"events": fulfillment_events or []},
+        }
+        if adjustments is not None:
+            body["adjustments"] = adjustments
+        return body
+
+    def test_webhook_classifies_shipped_from_fulfillment_event(self):
+        """The minimum-viable case: a webhook ships a new-shape order
+        body with a single `shipped` fulfillment event. The previous
+        body.get('status') path returned no status → ORDER_WEBHOOK_-
+        RECEIVED, masking the lifecycle. B8 must turn that into
+        ORDER_SHIPPED."""
+        body = self._new_shape_order(
+            fulfillment_events=[
+                {
+                    "id": "fe_1",
+                    "occurred_at": "2026-05-09T12:00:00Z",
+                    "type": "shipped",
+                    "line_items": [{"id": "li_1", "quantity": 1}],
+                    "tracking_number": "1Z999",
+                },
+            ]
+        )
+        result = UCPResponseParser.classify(
+            "POST",
+            "/hooks/abc",
+            200,
+            response_body={"status": "ok"},
+            request_body=body,
+            request_headers={
+                "Webhook-Id": "evt_42",
+                "Webhook-Timestamp": "1767225600",
+            },
+        )
+        assert result == UCPEventType.ORDER_SHIPPED
+
+    def test_webhook_classifies_delivered_from_latest_fulfillment_event(self):
+        """Multiple events ordered by timestamp: the latest event's
+        type wins. A `shipped` event followed by a `delivered` event
+        must classify as ORDER_DELIVERED — the current shipment state
+        is what dashboards pivot on."""
+        body = self._new_shape_order(
+            fulfillment_events=[
+                {
+                    "id": "fe_1",
+                    "occurred_at": "2026-05-08T08:00:00Z",
+                    "type": "shipped",
+                    "line_items": [{"id": "li_1", "quantity": 1}],
+                },
+                {
+                    "id": "fe_2",
+                    "occurred_at": "2026-05-09T17:00:00Z",
+                    "type": "delivered",
+                    "line_items": [{"id": "li_1", "quantity": 1}],
+                },
+            ]
+        )
+        result = UCPResponseParser.classify(
+            "POST",
+            "/webhooks/orders",
+            200,
+            response_body={"status": "ok"},
+            request_body=body,
+        )
+        assert result == UCPEventType.ORDER_DELIVERED
+
+    def test_webhook_classifies_out_of_order_events_by_occurred_at(self):
+        """Append-only contract says array order is chronological, but
+        a sender that batches / re-sends late deliveries shouldn't
+        flip lifecycle to the wrong state. The latest_by_occurred_at
+        helper sorts so a delivered event that lands earlier in the
+        array than a shipped event still wins (it has the higher
+        timestamp)."""
+        body = self._new_shape_order(
+            fulfillment_events=[
+                # delivered occurred LATER but ships earlier in the
+                # array — defensive sort by occurred_at picks it.
+                {
+                    "id": "fe_2",
+                    "occurred_at": "2026-05-09T17:00:00Z",
+                    "type": "delivered",
+                    "line_items": [],
+                },
+                {
+                    "id": "fe_1",
+                    "occurred_at": "2026-05-08T08:00:00Z",
+                    "type": "shipped",
+                    "line_items": [],
+                },
+            ]
+        )
+        result = UCPResponseParser.classify(
+            "POST",
+            "/webhooks/orders",
+            200,
+            response_body={"status": "ok"},
+            request_body=body,
+        )
+        assert result == UCPEventType.ORDER_DELIVERED
+
+    def test_returned_to_sender_classifies_as_returned(self):
+        body = self._new_shape_order(
+            fulfillment_events=[
+                {
+                    "id": "fe_1",
+                    "occurred_at": "2026-05-09T17:00:00Z",
+                    "type": "returned_to_sender",
+                    "line_items": [],
+                },
+            ]
+        )
+        result = UCPResponseParser.classify(
+            "POST",
+            "/webhooks/orders",
+            200,
+            response_body={"status": "ok"},
+            request_body=body,
+        )
+        assert result == UCPEventType.ORDER_RETURNED
+
+    def test_undeliverable_and_canceled_classify_as_canceled(self):
+        for event_type in ("canceled", "cancelled", "undeliverable"):
+            body = self._new_shape_order(
+                fulfillment_events=[
+                    {
+                        "id": "fe_1",
+                        "occurred_at": "2026-05-09T17:00:00Z",
+                        "type": event_type,
+                        "line_items": [],
+                    },
+                ]
+            )
+            result = UCPResponseParser.classify(
+                "POST",
+                "/webhooks/orders",
+                200,
+                response_body={"status": "ok"},
+                request_body=body,
+            )
+            assert result == UCPEventType.ORDER_CANCELED, f"type={event_type}"
+
+    def test_in_transit_classifies_as_shipped(self):
+        body = self._new_shape_order(
+            fulfillment_events=[
+                {
+                    "id": "fe_1",
+                    "occurred_at": "2026-05-09T17:00:00Z",
+                    "type": "in_transit",
+                    "line_items": [],
+                },
+            ]
+        )
+        result = UCPResponseParser.classify(
+            "POST",
+            "/webhooks/orders",
+            200,
+            response_body={"status": "ok"},
+            request_body=body,
+        )
+        # in_transit is a substate of "the package is on its way";
+        # surfaces as ORDER_SHIPPED for the lifecycle bucket.
+        assert result == UCPEventType.ORDER_SHIPPED
+
+    def test_adjustment_refund_classifies_as_returned_when_no_fulfillment(self):
+        """A refund-only webhook (no fulfillment events) maps to
+        ORDER_RETURNED. Adjustments are independent post-order events;
+        a refund is the money-side counterpart to a physical return."""
+        body = self._new_shape_order(
+            fulfillment_events=[],
+            adjustments=[
+                {
+                    "id": "adj_1",
+                    "type": "refund",
+                    "occurred_at": "2026-05-09T20:00:00Z",
+                    "status": "completed",
+                },
+            ],
+        )
+        result = UCPResponseParser.classify(
+            "POST",
+            "/webhooks/orders",
+            200,
+            response_body={"status": "ok"},
+            request_body=body,
+        )
+        assert result == UCPEventType.ORDER_RETURNED
+
+    def test_adjustment_cancellation_classifies_as_canceled(self):
+        body = self._new_shape_order(
+            fulfillment_events=[],
+            adjustments=[
+                {
+                    "id": "adj_1",
+                    "type": "cancellation",
+                    "occurred_at": "2026-05-09T20:00:00Z",
+                    "status": "completed",
+                },
+            ],
+        )
+        result = UCPResponseParser.classify(
+            "POST",
+            "/webhooks/orders",
+            200,
+            response_body={"status": "ok"},
+            request_body=body,
+        )
+        assert result == UCPEventType.ORDER_CANCELED
+
+    def test_fulfillment_events_take_precedence_over_adjustments(self):
+        """When both arrays carry lifecycle-bearing entries,
+        `fulfillment.events[]` wins — it's the authoritative shipment
+        log. An adjustment.type='refund' alongside a
+        fulfillment_event.type='delivered' classifies as
+        ORDER_DELIVERED (current shipment state), not ORDER_RETURNED
+        (the refund is a post-order money event)."""
+        body = self._new_shape_order(
+            fulfillment_events=[
+                {
+                    "id": "fe_1",
+                    "occurred_at": "2026-05-09T12:00:00Z",
+                    "type": "delivered",
+                    "line_items": [],
+                },
+            ],
+            adjustments=[
+                {
+                    "id": "adj_1",
+                    "type": "refund",
+                    "occurred_at": "2026-05-09T20:00:00Z",  # later
+                    "status": "completed",
+                },
+            ],
+        )
+        result = UCPResponseParser.classify(
+            "POST",
+            "/webhooks/orders",
+            200,
+            response_body={"status": "ok"},
+            request_body=body,
+        )
+        assert result == UCPEventType.ORDER_DELIVERED
+
+    def test_legacy_top_level_status_still_classifies(self):
+        """Senders that haven't moved to c5c6139 still ship the flat
+        shape. The legacy fallback must keep working — pinned with a
+        no-fulfillment.events/no-adjustments body carrying only
+        top-level `status`."""
+        body = {"id": "order_x", "checkout_id": "chk_a", "status": "delivered"}
+        result = UCPResponseParser.classify(
+            "POST",
+            "/webhooks/orders",
+            200,
+            response_body={"status": "ok"},
+            request_body=body,
+        )
+        assert result == UCPEventType.ORDER_DELIVERED
+
+    def test_new_shape_overrides_legacy_status_when_both_present(self):
+        """If a transitional sender ships BOTH a top-level status and
+        new-shape fulfillment.events[], new-shape wins. This is the
+        correct precedence as the new shape is the documented current
+        spec; the legacy field is the fallback for pre-migration
+        senders only."""
+        body = self._new_shape_order(
+            fulfillment_events=[
+                {
+                    "id": "fe_1",
+                    "occurred_at": "2026-05-09T17:00:00Z",
+                    "type": "delivered",
+                    "line_items": [],
+                },
+            ],
+        )
+        body["status"] = "shipped"  # legacy conflicting signal
+        result = UCPResponseParser.classify(
+            "POST",
+            "/webhooks/orders",
+            200,
+            response_body={"status": "ok"},
+            request_body=body,
+        )
+        assert result == UCPEventType.ORDER_DELIVERED
+
+    def test_empty_fulfillment_events_falls_through_to_webhook_received(self):
+        """A new-shape body with an empty events array and no
+        adjustments/status carries no lifecycle information →
+        ORDER_WEBHOOK_RECEIVED (the B5b generic-receipt type).
+        Empty != missing: the merchant explicitly told us there's no
+        shipment state yet."""
+        body = self._new_shape_order(fulfillment_events=[])
+        result = UCPResponseParser.classify(
+            "POST",
+            "/webhooks/orders",
+            200,
+            response_body={"status": "ok"},
+            request_body=body,
+        )
+        assert result == UCPEventType.ORDER_WEBHOOK_RECEIVED
+
+    def test_unknown_fulfillment_event_type_falls_through(self):
+        """`type` is an open string per the schema; we map only the
+        documented common values. A custom merchant-specific type
+        falls through to ORDER_WEBHOOK_RECEIVED rather than picking
+        a wrong lifecycle bucket — dashboards can still pivot on
+        latest_fulfillment_event_type for the custom name."""
+        body = self._new_shape_order(
+            fulfillment_events=[
+                {
+                    "id": "fe_1",
+                    "occurred_at": "2026-05-09T17:00:00Z",
+                    "type": "merchant_custom_warehouse_pickup",
+                    "line_items": [],
+                },
+            ],
+        )
+        result = UCPResponseParser.classify(
+            "POST",
+            "/webhooks/orders",
+            200,
+            response_body={"status": "ok"},
+            request_body=body,
+        )
+        assert result == UCPEventType.ORDER_WEBHOOK_RECEIVED
+
+    def test_rest_orders_get_classifies_from_fulfillment_events(self):
+        """The /orders/{id} REST GET path must derive lifecycle from
+        the same arrays — not just the webhook branch. Dashboards
+        that join webhook traffic and REST polling traffic need the
+        same taxonomy on both."""
+        body = self._new_shape_order(
+            fulfillment_events=[
+                {
+                    "id": "fe_1",
+                    "occurred_at": "2026-05-09T17:00:00Z",
+                    "type": "delivered",
+                    "line_items": [],
+                },
+            ],
+        )
+        result = UCPResponseParser.classify(
+            "GET",
+            "/orders/order_xyz",
+            200,
+            response_body=body,
+        )
+        assert result == UCPEventType.ORDER_DELIVERED
+
+    def test_malformed_entries_do_not_crash_classifier(self):
+        """A single non-dict entry in fulfillment.events[] (or
+        adjustments[]) must not take down the row. We skip it and
+        derive lifecycle from the remaining well-formed entries."""
+        body = self._new_shape_order(
+            fulfillment_events=[
+                "not-a-dict",
+                None,
+                {
+                    "id": "fe_1",
+                    "occurred_at": "2026-05-09T17:00:00Z",
+                    "type": "delivered",
+                    "line_items": [],
+                },
+            ],
+        )
+        result = UCPResponseParser.classify(
+            "POST",
+            "/webhooks/orders",
+            200,
+            response_body={"status": "ok"},
+            request_body=body,
+        )
+        assert result == UCPEventType.ORDER_DELIVERED
+
+
+class TestOrderLifecycleExtraction:
+    """B8 — extract-side companion to TestOrderLifecycleNewShape.
+    The JSON arrays and latest_* scalars feed dashboards that need
+    multi-event detail or fast pivots on the current shipment /
+    adjustment state."""
+
+    def test_fulfillment_events_serialized_to_json_column(self):
+        events = [
+            {
+                "id": "fe_1",
+                "occurred_at": "2026-05-08T08:00:00Z",
+                "type": "shipped",
+                "line_items": [{"id": "li_1", "quantity": 1}],
+                "tracking_number": "1Z999",
+                "carrier": "UPS",
+            },
+            {
+                "id": "fe_2",
+                "occurred_at": "2026-05-09T17:00:00Z",
+                "type": "delivered",
+                "line_items": [{"id": "li_1", "quantity": 1}],
+            },
+        ]
+        body = {
+            "id": "order_xyz",
+            "checkout_id": "chk_a",
+            "fulfillment": {"events": events},
+        }
+        fields = UCPResponseParser.extract(body)
+        # Full array round-trips through JSON for downstream
+        # JSON_QUERY_ARRAY access.
+        serialized = json.loads(fields["fulfillment_events_json"])
+        assert serialized == events
+        # Latest scalars picked by occurred_at — `delivered` is the
+        # later event, so it surfaces.
+        assert fields["latest_fulfillment_event_type"] == "delivered"
+        assert fields["latest_fulfillment_event_at"] == "2026-05-09T17:00:00Z"
+
+    def test_adjustments_serialized_to_json_column(self):
+        adjustments = [
+            {
+                "id": "adj_1",
+                "type": "refund",
+                "occurred_at": "2026-05-09T20:00:00Z",
+                "status": "completed",
+                "description": "Defective item",
+            },
+        ]
+        body = {
+            "id": "order_xyz",
+            "checkout_id": "chk_a",
+            "adjustments": adjustments,
+        }
+        fields = UCPResponseParser.extract(body)
+        serialized = json.loads(fields["adjustments_json"])
+        assert serialized == adjustments
+        assert fields["latest_adjustment_type"] == "refund"
+        assert fields["latest_adjustment_status"] == "completed"
+        assert fields["latest_adjustment_at"] == "2026-05-09T20:00:00Z"
+
+    def test_empty_arrays_omit_columns(self):
+        """No entries → no columns. Three-state nullable semantics:
+        NULL is "no data observed", distinct from FALSE / 0 / empty
+        string. Dashboards that COUNT(latest_*) get the right
+        "had any lifecycle data" denominator."""
+        body = {
+            "id": "order_xyz",
+            "checkout_id": "chk_a",
+            "fulfillment": {"events": []},
+            "adjustments": [],
+        }
+        fields = UCPResponseParser.extract(body)
+        assert "fulfillment_events_json" not in fields
+        assert "adjustments_json" not in fields
+        assert "latest_fulfillment_event_type" not in fields
+        assert "latest_adjustment_type" not in fields
+
+    def test_malformed_entries_filtered_from_json_column(self):
+        """Non-dict entries are skipped from the serialized JSON so
+        downstream JSON_QUERY doesn't choke. The clean entries
+        survive, including for latest_* derivation."""
+        events = [
+            "not-a-dict",
+            None,
+            42,
+            {
+                "id": "fe_1",
+                "occurred_at": "2026-05-09T17:00:00Z",
+                "type": "delivered",
+                "line_items": [],
+            },
+        ]
+        body = {
+            "id": "order_xyz",
+            "checkout_id": "chk_a",
+            "fulfillment": {"events": events},
+        }
+        fields = UCPResponseParser.extract(body)
+        serialized = json.loads(fields["fulfillment_events_json"])
+        # Only the clean dict survives.
+        assert len(serialized) == 1
+        assert serialized[0]["id"] == "fe_1"
+        assert fields["latest_fulfillment_event_type"] == "delivered"
+
+    def test_no_fulfillment_object_at_all(self):
+        body = {"id": "order_xyz", "checkout_id": "chk_a"}
+        fields = UCPResponseParser.extract(body)
+        assert "fulfillment_events_json" not in fields
+        assert "latest_fulfillment_event_type" not in fields
+
+    def test_fulfillment_events_with_only_one_event(self):
+        body = {
+            "id": "order_xyz",
+            "checkout_id": "chk_a",
+            "fulfillment": {
+                "events": [
+                    {
+                        "id": "fe_1",
+                        "occurred_at": "2026-05-09T17:00:00Z",
+                        "type": "processing",
+                        "line_items": [],
+                    },
+                ]
+            },
+        }
+        fields = UCPResponseParser.extract(body)
+        assert fields["latest_fulfillment_event_type"] == "processing"
+        # `processing` doesn't map to any ORDER_* lifecycle event,
+        # but the extract-side column still records it for
+        # dashboards that pivot on the raw type.
+
+    def test_latest_picked_by_occurred_at_not_array_position(self):
+        """Out-of-order array — analytics records the entry with
+        the latest occurred_at, not the last array element. Defensive
+        against senders that batch deliveries."""
+        body = {
+            "id": "order_xyz",
+            "checkout_id": "chk_a",
+            "fulfillment": {
+                "events": [
+                    {
+                        "id": "fe_late",
+                        "occurred_at": "2026-05-09T17:00:00Z",
+                        "type": "delivered",
+                        "line_items": [],
+                    },
+                    {
+                        "id": "fe_early",
+                        "occurred_at": "2026-05-08T08:00:00Z",
+                        "type": "shipped",
+                        "line_items": [],
+                    },
+                ]
+            },
+        }
+        fields = UCPResponseParser.extract(body)
+        assert fields["latest_fulfillment_event_type"] == "delivered"
+        assert fields["latest_fulfillment_event_at"] == "2026-05-09T17:00:00Z"
+
+    def test_mixed_z_and_offset_timestamps_compared_as_instants(self):
+        """RFC 3339 lets timestamps use Z (UTC) or numeric offsets like
+        +02:00. Lexicographic sort on the raw strings would compare
+        "12:00:00+02:00" > "10:30:00Z" even though +02:00 makes 12:00
+        local equal to 10:00 UTC — earlier than 10:30 UTC. Parse to
+        aware datetimes for comparison so the actual instant wins.
+
+        Reviewer's PR #20 repro: a `shipped` event with offset
+        timestamp paired with a `delivered` event in Z form. The
+        delivered instant (10:30 UTC) is later than the shipped
+        instant (10:00 UTC), so the latest-event scalar must be
+        `delivered` and the lifecycle event must be ORDER_DELIVERED."""
+        body = {
+            "id": "order_1",
+            "checkout_id": "chk_1",
+            "fulfillment": {
+                "events": [
+                    {
+                        "id": "fe_1",
+                        "occurred_at": "2026-05-09T10:30:00Z",  # 10:30 UTC
+                        "type": "delivered",
+                        "line_items": [],
+                    },
+                    {
+                        "id": "fe_2",
+                        "occurred_at": "2026-05-09T12:00:00+02:00",  # 10:00 UTC
+                        "type": "shipped",
+                        "line_items": [],
+                    },
+                ]
+            },
+        }
+        fields = UCPResponseParser.extract(body)
+        assert fields["latest_fulfillment_event_type"] == "delivered"
+        # Raw string preserved verbatim — we only normalize for sort.
+        assert fields["latest_fulfillment_event_at"] == "2026-05-09T10:30:00Z"
+        # Classifier sees the same instant ordering.
+        assert (
+            UCPResponseParser.classify(
+                "POST",
+                "/webhooks/incoming",
+                200,
+                response_body={"status": "ok"},
+                request_body=body,
+            )
+            == UCPEventType.ORDER_DELIVERED
+        )
+
+    def test_adjustment_mixed_z_and_offset_compared_as_instants(self):
+        """Same fix applies on the adjustments[] side."""
+        body = {
+            "id": "order_1",
+            "checkout_id": "chk_1",
+            "adjustments": [
+                {
+                    "id": "adj_late",
+                    "type": "refund",
+                    "occurred_at": "2026-05-09T20:30:00Z",  # 20:30 UTC
+                    "status": "completed",
+                },
+                {
+                    "id": "adj_early",
+                    "type": "cancellation",
+                    "occurred_at": "2026-05-09T22:00:00+02:00",  # 20:00 UTC
+                    "status": "completed",
+                },
+            ],
+        }
+        fields = UCPResponseParser.extract(body)
+        assert fields["latest_adjustment_type"] == "refund"
+        assert fields["latest_adjustment_at"] == "2026-05-09T20:30:00Z"
+
+    def test_negative_offset_timestamps(self):
+        """Offsets can be negative too. `-05:00` means the local clock
+        is 5h behind UTC, so the UTC equivalent is later than the
+        wall-clock time suggests."""
+        body = {
+            "id": "order_1",
+            "checkout_id": "chk_1",
+            "fulfillment": {
+                "events": [
+                    # 08:00 in -05:00 zone == 13:00 UTC
+                    {
+                        "id": "fe_1",
+                        "occurred_at": "2026-05-09T08:00:00-05:00",
+                        "type": "delivered",
+                        "line_items": [],
+                    },
+                    # 11:00 UTC == 06:00 in -05:00 zone (earlier)
+                    {
+                        "id": "fe_2",
+                        "occurred_at": "2026-05-09T11:00:00Z",
+                        "type": "shipped",
+                        "line_items": [],
+                    },
+                ]
+            },
+        }
+        fields = UCPResponseParser.extract(body)
+        # 13:00 UTC wins.
+        assert fields["latest_fulfillment_event_type"] == "delivered"
+
+    def test_malformed_occurred_at_sorts_behind_valid_timestamps(self):
+        """An entry with an unparseable occurred_at must not win over
+        an entry with a valid one — even if the malformed string sorts
+        higher lexicographically. The valid entry is the only one we
+        can trust to express chronology."""
+        body = {
+            "id": "order_1",
+            "checkout_id": "chk_1",
+            "fulfillment": {
+                "events": [
+                    {
+                        "id": "fe_valid",
+                        "occurred_at": "2026-05-09T17:00:00Z",
+                        "type": "delivered",
+                        "line_items": [],
+                    },
+                    {
+                        "id": "fe_garbage",
+                        "occurred_at": "zzz-not-a-date",
+                        "type": "shipped",
+                        "line_items": [],
+                    },
+                ]
+            },
+        }
+        fields = UCPResponseParser.extract(body)
+        assert fields["latest_fulfillment_event_type"] == "delivered"
+
+    def test_all_malformed_occurred_at_falls_back_to_last_array_entry(self):
+        """If no entry has a parseable occurred_at, the fallback is
+        the last array position — append-only contract makes that
+        chronologically latest by convention. Still surfacing
+        something is better than dropping the column."""
+        body = {
+            "id": "order_1",
+            "checkout_id": "chk_1",
+            "fulfillment": {
+                "events": [
+                    {
+                        "id": "fe_1",
+                        "type": "shipped",
+                        "line_items": [],
+                    },
+                    {
+                        "id": "fe_2",
+                        "occurred_at": "not-a-date",
+                        "type": "delivered",
+                        "line_items": [],
+                    },
+                ]
+            },
+        }
+        fields = UCPResponseParser.extract(body)
+        # Last array entry's type wins on the no-parseable-timestamp
+        # fallback.
+        assert fields["latest_fulfillment_event_type"] == "delivered"
+        # The TIMESTAMP column must NOT carry the raw malformed
+        # string — BigQuery would reject the row.
+        assert "latest_fulfillment_event_at" not in fields
+
+    def test_naive_timestamp_does_not_crash_classifier(self):
+        """`datetime.fromisoformat("2026-05-09T17:00:00")` returns a
+        NAIVE datetime (no tz). Comparing naive with aware datetimes
+        (from Z / +offset entries in the same array) raises
+        ``TypeError: can't compare offset-naive and offset-aware
+        datetimes``. _parse_occurred_at must reject naive results so
+        the naive entry sorts behind the aware one rather than
+        triggering the comparison crash.
+
+        Reviewer's PR #20 second-pass repro: an array mixing a naive
+        ISO string with a Z-form string must not crash the
+        classifier — the aware entry wins on the comparison."""
+        body = {
+            "id": "order_1",
+            "checkout_id": "chk_1",
+            "fulfillment": {
+                "events": [
+                    # Naive — should sort behind the aware entry.
+                    {
+                        "id": "fe_1",
+                        "occurred_at": "2026-05-09T17:00:00",
+                        "type": "shipped",
+                        "line_items": [],
+                    },
+                    # Aware — wins.
+                    {
+                        "id": "fe_2",
+                        "occurred_at": "2026-05-09T12:00:00Z",
+                        "type": "delivered",
+                        "line_items": [],
+                    },
+                ]
+            },
+        }
+        # No crash, and the aware entry is the winner.
+        fields = UCPResponseParser.extract(body)
+        assert fields["latest_fulfillment_event_type"] == "delivered"
+        assert fields["latest_fulfillment_event_at"] == "2026-05-09T12:00:00Z"
+        # Classifier also doesn't crash and picks the aware entry.
+        assert (
+            UCPResponseParser.classify(
+                "POST",
+                "/webhooks/incoming",
+                200,
+                response_body={"status": "ok"},
+                request_body=body,
+            )
+            == UCPEventType.ORDER_DELIVERED
+        )
+
+    def test_all_naive_timestamps_omit_timestamp_column(self):
+        """Every entry has a naive (no-timezone) occurred_at. They
+        all fail to parse, the fallback picks the last array entry
+        for the type column, and the TIMESTAMP column stays absent
+        (BigQuery would reject a naive ISO string in a TIMESTAMP
+        column too)."""
+        body = {
+            "id": "order_1",
+            "checkout_id": "chk_1",
+            "fulfillment": {
+                "events": [
+                    {
+                        "id": "fe_1",
+                        "occurred_at": "2026-05-09T08:00:00",
+                        "type": "shipped",
+                        "line_items": [],
+                    },
+                    {
+                        "id": "fe_2",
+                        "occurred_at": "2026-05-09T17:00:00",
+                        "type": "delivered",
+                        "line_items": [],
+                    },
+                ]
+            },
+        }
+        fields = UCPResponseParser.extract(body)
+        # Type column populated from the fallback (last entry).
+        assert fields["latest_fulfillment_event_type"] == "delivered"
+        # Timestamp omitted — the naive string is not a valid
+        # BigQuery TIMESTAMP value.
+        assert "latest_fulfillment_event_at" not in fields
+
+    def test_all_malformed_adjustments_omit_timestamp_column(self):
+        """Companion to the fulfillment-side test: malformed
+        adjustments[] timestamps must keep type+status populated
+        from the fallback entry but skip the TIMESTAMP column."""
+        body = {
+            "id": "order_1",
+            "checkout_id": "chk_1",
+            "adjustments": [
+                {
+                    "id": "adj_1",
+                    "type": "refund",
+                    "occurred_at": "garbage",
+                    "status": "pending",
+                },
+                {
+                    "id": "adj_2",
+                    "type": "cancellation",
+                    "occurred_at": "also-garbage",
+                    "status": "completed",
+                },
+            ],
+        }
+        fields = UCPResponseParser.extract(body)
+        # Type and status come from the last-array-entry fallback.
+        assert fields["latest_adjustment_type"] == "cancellation"
+        assert fields["latest_adjustment_status"] == "completed"
+        # Timestamp column absent — would reject the row otherwise.
+        assert "latest_adjustment_at" not in fields
+
+
 class TestCheckoutStatusScoping:
     """Tests that checkout_status is only set for checkout responses."""
 

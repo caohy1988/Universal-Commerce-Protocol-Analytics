@@ -166,3 +166,18 @@ class TestGetDDL:
         assert "eligibility_accepted_present BOOL" in ddl
         assert "eligibility_not_accepted_present BOOL" in ddl
         assert "eligibility_invalid_present BOOL" in ddl
+
+    def test_order_lifecycle_columns_present(self):
+        """B8 — pin all seven order lifecycle columns: two JSON
+        arrays preserve the verbatim fulfillment.events[] and
+        adjustments[] for multi-event KPIs, five scalars surface the
+        current state (event type + adjustment type/status + two
+        TIMESTAMP columns for time-since-latest-event)."""
+        ddl = get_ddl("p", "d", "t")
+        assert "fulfillment_events_json JSON" in ddl
+        assert "adjustments_json JSON" in ddl
+        assert "latest_fulfillment_event_type STRING" in ddl
+        assert "latest_fulfillment_event_at TIMESTAMP" in ddl
+        assert "latest_adjustment_type STRING" in ddl
+        assert "latest_adjustment_status STRING" in ddl
+        assert "latest_adjustment_at TIMESTAMP" in ddl

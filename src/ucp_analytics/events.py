@@ -231,6 +231,20 @@ class UCPEvent:
     # --- order ---
     permalink_url: Optional[str] = None
 
+    # --- order lifecycle (B8: fulfillment.events[] + adjustments[]) ---
+    # At UCP order.md/c5c6139 the order has no top-level `status`;
+    # lifecycle lives in two append-only arrays. Full arrays
+    # preserved as JSON for multi-event KPIs (e.g., time from shipped
+    # to delivered, refund rate over time); narrow "latest" scalars
+    # surface the current state for fast-pivot dashboards.
+    fulfillment_events_json: Optional[str] = None
+    adjustments_json: Optional[str] = None
+    latest_fulfillment_event_type: Optional[str] = None
+    latest_fulfillment_event_at: Optional[str] = None
+    latest_adjustment_type: Optional[str] = None
+    latest_adjustment_status: Optional[str] = None
+    latest_adjustment_at: Optional[str] = None
+
     # --- messages / errors ---
     error_code: Optional[str] = None
     error_message: Optional[str] = None

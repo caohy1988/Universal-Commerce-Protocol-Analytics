@@ -98,6 +98,19 @@ BQ_SCHEMA_FIELDS = [
     ("continue_url", "STRING", "NULLABLE"),
     # order
     ("permalink_url", "STRING", "NULLABLE"),
+    # B8 — order lifecycle from fulfillment.events[] + adjustments[].
+    # At c5c6139 order.json has no top-level `status`; lifecycle is
+    # observable only through these two append-only arrays. JSON
+    # columns preserve the full arrays for multi-event KPIs; latest_*
+    # scalars surface the current state for fast-pivot dashboards.
+    # latest_* are picked by highest `occurred_at` (RFC 3339).
+    ("fulfillment_events_json", "JSON", "NULLABLE"),
+    ("adjustments_json", "JSON", "NULLABLE"),
+    ("latest_fulfillment_event_type", "STRING", "NULLABLE"),
+    ("latest_fulfillment_event_at", "TIMESTAMP", "NULLABLE"),
+    ("latest_adjustment_type", "STRING", "NULLABLE"),
+    ("latest_adjustment_status", "STRING", "NULLABLE"),
+    ("latest_adjustment_at", "TIMESTAMP", "NULLABLE"),
     # errors
     ("error_code", "STRING", "NULLABLE"),
     ("error_message", "STRING", "NULLABLE"),
