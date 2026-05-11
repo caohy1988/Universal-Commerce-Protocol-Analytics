@@ -536,6 +536,9 @@ class UCPResponseParser:
         # --- ucp metadata envelope ---
         cls._extract_ucp_metadata(body.get("ucp"), result)
 
+        # --- A3: embedded transport config from ucp.services[*] ---
+        cls._extract_embedded_services(body.get("ucp"), result)
+
         # --- payment_handlers registry from ucp metadata ---
         cls._extract_payment_available_instruments(body.get("ucp"), result)
 
@@ -810,6 +813,82 @@ class UCPResponseParser:
             caps_list = cls._normalize_registry(caps_raw)
             if caps_list:
                 result["capabilities_json"] = json.dumps(caps_list, default=str)
+
+    @classmethod
+    def _extract_embedded_services(cls, ucp_meta: Any, result: Dict[str, Any]) -> None:
+        """Aggregate embedded-transport config across `ucp.services[*]`.
+
+        Discovery responses (`/.well-known/ucp`) carry a service
+        registry keyed by capability reverse-domain name; each value
+        is a list of service bindings, one per transport. Embedded
+        bindings carry an `EmbeddedTransportConfig` block under
+        `config` with two fields we surface for dashboards:
+
+          * `delegate`     — link delegations the business allows
+                             (e.g. ``["navigate", "submit_form"]``)
+          * `color_scheme` — themes the business supports
+                             (subset of ``["light", "dark"]``)
+
+        We union both fields across all embedded services in the
+        response, order-preserving and deduped — answering questions
+        like "% of platforms supporting dark mode" or "what
+        delegations are most commonly granted" with a single column.
+        Per-service detail stays available via the existing
+        `capabilities_json` column if dashboards need to disaggregate.
+
+        Non-embedded transport entries (rest / mcp / a2a) are ignored.
+        Malformed config shapes (non-dict config, non-list delegate /
+        color_scheme, non-string entries) are skipped silently so a
+        single buggy service doesn't drop the column for the row.
+        """
+        if not isinstance(ucp_meta, dict):
+            return
+        services = ucp_meta.get("services")
+        if not isinstance(services, dict):
+            return
+
+        delegations: List[str] = []
+        color_schemes: List[str] = []
+        seen_delegations: set = set()
+        seen_color_schemes: set = set()
+
+        for entries in services.values():
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                if entry.get("transport") != "embedded":
+                    continue
+                config = entry.get("config")
+                if not isinstance(config, dict):
+                    continue
+                # `isinstance(... , list)` is load-bearing: strings
+                # are iterable in Python, so a sender that ships
+                # `delegate: "navigate"` (string, not list) would
+                # otherwise iterate characters and pass the
+                # isinstance(str) check on each one. We accept only
+                # explicit lists.
+                raw_delegate = config.get("delegate")
+                if isinstance(raw_delegate, list):
+                    for delegate in raw_delegate:
+                        if (
+                            isinstance(delegate, str)
+                            and delegate not in seen_delegations
+                        ):
+                            seen_delegations.add(delegate)
+                            delegations.append(delegate)
+                raw_color_scheme = config.get("color_scheme")
+                if isinstance(raw_color_scheme, list):
+                    for scheme in raw_color_scheme:
+                        if isinstance(scheme, str) and scheme not in seen_color_schemes:
+                            seen_color_schemes.add(scheme)
+                            color_schemes.append(scheme)
+
+        if delegations:
+            result["embedded_delegations_json"] = json.dumps(delegations)
+        if color_schemes:
+            result["embedded_color_schemes_json"] = json.dumps(color_schemes)
 
     @classmethod
     def _extract_discovery_payment(cls, payment: Any, result: Dict[str, Any]) -> None:

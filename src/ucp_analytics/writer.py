@@ -28,6 +28,16 @@ BQ_SCHEMA_FIELDS = [
     ("merchant_host", "STRING", "NULLABLE"),
     ("platform_profile_url", "STRING", "NULLABLE"),
     ("transport", "STRING", "NULLABLE"),
+    # A3: Embedded Checkout (server-observable slice). Discovery
+    # responses surface per-capability embedded service config
+    # (`delegate`, `color_scheme`); host requests append
+    # `ec_color_scheme` as a URL query param when fetching the
+    # embedded page. Runtime postMessage events (ec.totals.change,
+    # reauth, etc.) are not capturable server-side and are out of
+    # scope for this slice.
+    ("embedded_delegations_json", "JSON", "NULLABLE"),
+    ("embedded_color_schemes_json", "JSON", "NULLABLE"),
+    ("embedded_ec_color_scheme", "STRING", "NULLABLE"),
     # HTTP
     ("http_method", "STRING", "NULLABLE"),
     ("http_path", "STRING", "NULLABLE"),

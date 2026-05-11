@@ -10,7 +10,7 @@ import asyncio
 import json
 import logging
 from typing import Any, Callable, Dict, List, Mapping, Optional
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from ucp_analytics._headers import (
     is_signed,
@@ -149,6 +149,32 @@ class UCPAnalyticsTracker:
 
         merchant_host = (parsed_url.hostname or "") if parsed_url else ""
 
+        # A3: extract embedded checkout query params from the request.
+        # The `ec_color_scheme` param is sent by the host when fetching
+        # the embedded checkout page to request a theme. parse_qs
+        # returns lists (a query string can repeat a key); take the
+        # first value to mirror what a web server would surface as
+        # request.args["ec_color_scheme"]. Caps validity to "what was
+        # sent" — operators may pass non-spec values and we record
+        # signal fidelity.
+        #
+        # record_http accepts both `url` and `path`; direct callers
+        # may pass the query string on either. Prefer the parsed url's
+        # query when it exists; fall back to parsing the path itself
+        # so `path="/embedded-checkout?ec_color_scheme=dark"` doesn't
+        # silently drop the signal.
+        query: str = ""
+        if parsed_url and parsed_url.query:
+            query = parsed_url.query
+        elif path and "?" in path:
+            query = urlparse(path).query
+        embedded_ec_color_scheme: Optional[str] = None
+        if query:
+            params = parse_qs(query, keep_blank_values=False)
+            values = params.get("ec_color_scheme")
+            if values:
+                embedded_ec_color_scheme = values[0]
+
         # Single source of truth for "is this a webhook delivery?" — used
         # both to gate body extraction toward the request side and to
         # scope Webhook-Id / Webhook-Timestamp capture to webhook flows
@@ -231,6 +257,13 @@ class UCPAnalyticsTracker:
             # business's. The legacy platform_profile_url field above keeps
             # storing the raw header string for backwards compatibility.
             ucp_agent_profile_url=ucp_agent_profile_url(request_headers),
+            # A3: embedded checkout `ec_color_scheme` query param.
+            # Surfaced unconditionally — the param is host-controlled
+            # and the embedded checkout URL it travels on may not
+            # match any UCP-specific path prefix; recording when it
+            # appears tells dashboards which themes hosts are
+            # actually requesting.
+            embedded_ec_color_scheme=embedded_ec_color_scheme,
         )
 
         # WWW-Authenticate Bearer challenge (RFC 7235 / RFC 6750 / RFC 9728).
