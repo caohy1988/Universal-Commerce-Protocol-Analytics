@@ -1417,6 +1417,10 @@ class TestWebhookClassification:
         )
 
     def test_partner_webhook_no_body(self):
+        # Webhook detected by path, body has no recognizable lifecycle
+        # status → ORDER_WEBHOOK_RECEIVED (B5b: don't pivot taxonomy on
+        # URL format). Distinct from ORDER_UPDATED, which is reserved
+        # for REST-driven /orders/{id} updates from the business side.
         assert (
             UCPResponseParser.classify(
                 "POST",
@@ -1424,13 +1428,13 @@ class TestWebhookClassification:
                 200,
                 None,
             )
-            == UCPEventType.ORDER_UPDATED
+            == UCPEventType.ORDER_WEBHOOK_RECEIVED
         )
 
     def test_generic_webhook_fallback(self):
         assert (
             UCPResponseParser.classify("POST", "/webhooks/some-other-event", 200, {})
-            == UCPEventType.ORDER_UPDATED
+            == UCPEventType.ORDER_WEBHOOK_RECEIVED
         )
 
     def test_webhook_error_500(self):
@@ -1448,6 +1452,152 @@ class TestWebhookClassification:
             UCPResponseParser.classify("POST", "/webhooks/some-event", 400, {})
             == UCPEventType.ERROR
         )
+
+    # ---- B5b: platform-provided webhook URLs + header fallback ----
+
+    def test_platform_provided_webhook_url_via_extra_prefix(self):
+        """UCP order.md: 'The URL format is platform-specific.' A
+        platform that publishes its webhook destination as `/events`
+        is the canonical motivation for this row -- the default
+        `/webhook(s)` filter alone misses it. The classifier must
+        accept operator-configured prefixes via webhook_path_prefixes
+        and route the request through the order-webhook branch."""
+        result = UCPResponseParser.classify(
+            "POST",
+            "/events",
+            200,
+            response_body=None,
+            request_body={"id": "order_xyz", "status": "shipped"},
+            webhook_path_prefixes=("/events",),
+        )
+        assert result == UCPEventType.ORDER_SHIPPED
+
+    def test_header_based_webhook_fallback_unknown_path(self):
+        """When the URL is not a known UCP path, presence of
+        Webhook-Id + Webhook-Timestamp on the request must trigger
+        the order-webhook branch -- this is the safety net for
+        platforms whose webhook URL the operator hasn't enumerated.
+        UCP order.md requires both headers on every order webhook,
+        so the pair is a strong fingerprint."""
+        result = UCPResponseParser.classify(
+            "POST",
+            "/hooks/abc-123",
+            200,
+            response_body={"status": "ok"},
+            request_body={"id": "order_xyz", "status": "delivered"},
+            request_headers={
+                "Webhook-Id": "evt_42",
+                "Webhook-Timestamp": "1767225600",
+            },
+        )
+        assert result == UCPEventType.ORDER_DELIVERED
+
+    def test_header_fallback_suppressed_on_known_rest_path(self):
+        """Webhook headers on /checkout-sessions can only come from a
+        buggy or malicious sender -- the URL determines the operation
+        on known UCP REST endpoints. The classifier must NOT route
+        such requests into the webhook branch even though the headers
+        are present."""
+        result = UCPResponseParser.classify(
+            "POST",
+            "/checkout-sessions",
+            201,
+            response_body={"id": "chk_xyz", "status": "ready_for_complete"},
+            request_headers={
+                "Webhook-Id": "evt_definitely_not_a_webhook",
+                "Webhook-Timestamp": "1767225600",
+            },
+        )
+        # /checkout-sessions POST → CHECKOUT_SESSION_CREATED, not any
+        # ORDER_* type.
+        assert result == UCPEventType.CHECKOUT_SESSION_CREATED
+
+    def test_header_only_one_of_pair_does_not_trigger(self):
+        """Standard Webhooks ships Webhook-Id AND Webhook-Timestamp
+        together; either alone is not a valid delivery. A request
+        with only one of the pair must not trigger the header
+        fallback -- otherwise senders that happen to use a similarly
+        named header for unrelated purposes would be misdetected."""
+        result_id_only = UCPResponseParser.classify(
+            "POST",
+            "/api/v1/random",
+            200,
+            response_body={},
+            request_headers={"Webhook-Id": "evt_42"},
+        )
+        result_ts_only = UCPResponseParser.classify(
+            "POST",
+            "/api/v1/random",
+            200,
+            response_body={},
+            request_headers={"Webhook-Timestamp": "1767225600"},
+        )
+        # Falls through past the webhook branch — the path doesn't
+        # match any UCP marker either, so we land on the generic
+        # REQUEST fallback rather than ORDER_*.
+        assert result_id_only != UCPEventType.ORDER_WEBHOOK_RECEIVED
+        assert result_ts_only != UCPEventType.ORDER_WEBHOOK_RECEIVED
+
+    def test_header_fallback_with_body_lifecycle_status(self):
+        """The webhook detection (header pair) and the lifecycle
+        derivation (body status) are independent: detection enters
+        the branch, body picks the specific event type. Pin that
+        body status drives taxonomy regardless of which signal got
+        us into the branch."""
+        for status, expected in [
+            ("shipped", UCPEventType.ORDER_SHIPPED),
+            ("delivered", UCPEventType.ORDER_DELIVERED),
+            ("returned", UCPEventType.ORDER_RETURNED),
+            ("canceled", UCPEventType.ORDER_CANCELED),
+            ("cancelled", UCPEventType.ORDER_CANCELED),
+        ]:
+            result = UCPResponseParser.classify(
+                "POST",
+                "/ucp-events/incoming",
+                200,
+                response_body={"status": "ok"},
+                request_body={"status": status},
+                request_headers={
+                    "Webhook-Id": f"evt_{status}",
+                    "Webhook-Timestamp": "1767225600",
+                },
+            )
+            assert result == expected, f"status={status}"
+
+    def test_header_fallback_no_lifecycle_status_emits_webhook_received(self):
+        """A webhook detected by headers but with no body lifecycle
+        status emits ORDER_WEBHOOK_RECEIVED. This is distinct from
+        ORDER_UPDATED (REST-driven business->platform updates) and
+        the new B5b taxonomy: the URL no longer determines the
+        type, the body does, and absence-of-status has its own
+        first-class type."""
+        result = UCPResponseParser.classify(
+            "POST",
+            "/hooks/123",
+            200,
+            response_body={"status": "ok"},
+            request_body={"id": "order_xyz"},
+            request_headers={
+                "Webhook-Id": "evt_42",
+                "Webhook-Timestamp": "1767225600",
+            },
+        )
+        assert result == UCPEventType.ORDER_WEBHOOK_RECEIVED
+
+    def test_legacy_url_segment_fallback_still_works(self):
+        """Senders that don't include status in body but use the
+        legacy URL-segment convention (`/webhooks/order-delivered`)
+        still classify correctly. Body-driven derivation takes
+        precedence; URL segment is the fallback for body-less
+        senders."""
+        result = UCPResponseParser.classify(
+            "POST",
+            "/webhooks/order-delivered",
+            200,
+            response_body=None,
+            request_body=None,
+        )
+        assert result == UCPEventType.ORDER_DELIVERED
 
 
 class TestCheckoutStatusScoping:
