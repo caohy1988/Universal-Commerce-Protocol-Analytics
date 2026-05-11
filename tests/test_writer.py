@@ -167,6 +167,14 @@ class TestGetDDL:
         assert "eligibility_not_accepted_present BOOL" in ddl
         assert "eligibility_invalid_present BOOL" in ddl
 
+    def test_signature_alg_columns_present(self):
+        """C5c — pin both per-direction algorithm columns. Missing
+        one would silently drop the corresponding column from
+        auto_create_table and then break INSERTs."""
+        ddl = get_ddl("p", "d", "t")
+        assert "request_signature_alg STRING" in ddl
+        assert "response_signature_alg STRING" in ddl
+
     def test_order_lifecycle_columns_present(self):
         """B8 — pin all seven order lifecycle columns: two JSON
         arrays preserve the verbatim fulfillment.events[] and

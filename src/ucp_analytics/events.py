@@ -144,13 +144,18 @@ class UCPEvent:
     # header was present on the corresponding side; the keyid columns
     # carry the first parsable `keyid` parameter so dashboards can
     # join against the JWK published at `/.well-known/ucp`'s
-    # `signing_keys[]`. Algorithm columns are deferred — the spec
-    # derives algorithm from the JWK `crv`, not from the wire header,
-    # and resolving that requires JWK lookup that lands later.
+    # `signing_keys[]`. Algorithm columns (C5c) are derived from the
+    # matched JWK's `crv` field via an operator-provided jwk_lookup
+    # callable on the tracker — UCP signatures.md states the algorithm
+    # is NOT in `Signature-Input` and must be looked up from the JWK.
+    # NULL when no jwk_lookup is configured, no keyid was extracted,
+    # the lookup misses, or the curve doesn't map to a known JWA alg.
     request_signed: Optional[bool] = None
     response_signed: Optional[bool] = None
     request_signature_keyid: Optional[str] = None
     response_signature_keyid: Optional[str] = None
+    request_signature_alg: Optional[str] = None
+    response_signature_alg: Optional[str] = None
 
     # --- Standard Webhooks metadata (UCP order.md) ---
     # Captured from `Webhook-Id` and `Webhook-Timestamp` request headers

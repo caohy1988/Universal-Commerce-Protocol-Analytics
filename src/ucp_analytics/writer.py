@@ -48,6 +48,14 @@ BQ_SCHEMA_FIELDS = [
     ("response_signed", "BOOL", "NULLABLE"),
     ("request_signature_keyid", "STRING", "NULLABLE"),
     ("response_signature_keyid", "STRING", "NULLABLE"),
+    # C5c: signature algorithm per direction. Derived from the matched
+    # JWK's `crv` field, looked up via the tracker's optional
+    # jwk_lookup callable. NULL when no lookup is configured or the
+    # curve can't be mapped — keyid alone is enough to answer
+    # "is it signed", so this column is forensic / crypto-agility
+    # signal, not the primary signed-traffic KPI.
+    ("request_signature_alg", "STRING", "NULLABLE"),
+    ("response_signature_alg", "STRING", "NULLABLE"),
     # Standard Webhooks metadata (UCP order.md)
     ("webhook_id", "STRING", "NULLABLE"),
     ("webhook_timestamp", "TIMESTAMP", "NULLABLE"),
