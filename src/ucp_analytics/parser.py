@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from ucp_analytics._path_match import is_webhook_delivery
@@ -32,6 +33,158 @@ _ELIGIBILITY_OUTCOME_CODES = frozenset(
         "eligibility_invalid",
     }
 )
+
+# B8 — Order lifecycle derived from fulfillment.events[] and
+# adjustments[]. At c5c6139 `order.json` no longer carries a top-level
+# `status`; the append-only `fulfillment.events[]` log is the
+# authoritative shipment state and `adjustments[]` captures
+# post-order events (refunds / returns / disputes / cancellations).
+# Per the FulfillmentEvent / Adjustment schemas, `type` is an open
+# string with documented common values; we map the common values that
+# correspond to our existing ORDER_* event types and leave anything
+# else to fall through to ORDER_WEBHOOK_RECEIVED.
+_FULFILLMENT_EVENT_TYPE_TO_EVENT = {
+    "shipped": UCPEventType.ORDER_SHIPPED,
+    "in_transit": UCPEventType.ORDER_SHIPPED,
+    "delivered": UCPEventType.ORDER_DELIVERED,
+    "returned_to_sender": UCPEventType.ORDER_RETURNED,
+    "canceled": UCPEventType.ORDER_CANCELED,
+    "cancelled": UCPEventType.ORDER_CANCELED,
+    "undeliverable": UCPEventType.ORDER_CANCELED,
+}
+_ADJUSTMENT_TYPE_TO_EVENT = {
+    "return": UCPEventType.ORDER_RETURNED,
+    "refund": UCPEventType.ORDER_RETURNED,
+    "cancellation": UCPEventType.ORDER_CANCELED,
+}
+
+
+def _parse_occurred_at(value: Any) -> Optional[datetime]:
+    """Parse an RFC 3339 ``occurred_at`` string into an aware datetime.
+
+    Accepts both the ``Z`` (UTC) and ``±HH:MM`` offset forms that
+    RFC 3339 permits. Returns None on missing / malformed input so
+    callers can sort unparseable entries behind valid ones rather
+    than crashing on them.
+
+    ``datetime.fromisoformat`` only learned to accept ``Z`` directly
+    in Python 3.11; we normalize ``...Z`` → ``...+00:00`` first so
+    the helper works on older runtimes too.
+
+    Naive datetimes (no tzinfo) are treated as invalid. RFC 3339
+    requires a timezone designator on every timestamp; without one
+    we'd compare a naive datetime against the aware datetimes from
+    Z/offset entries and Python raises ``TypeError`` ("can't compare
+    offset-naive and offset-aware datetimes"). Treating naive values
+    as invalid sorts them behind well-formed entries via the
+    ``_latest_by_occurred_at`` fallback path, preserving extraction
+    rather than crashing.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        dt = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if dt.tzinfo is None or dt.utcoffset() is None:
+        return None
+    return dt
+
+
+def _latest_by_occurred_at(items: Any) -> Optional[dict]:
+    """Return the entry with the latest ``occurred_at`` from a UCP event
+    array, or None if the array is empty / malformed.
+
+    Append-only event logs (FulfillmentEvent, Adjustment) should be in
+    chronological order on the wire, but a sender that doesn't preserve
+    order (or that injects late-arriving deliveries) shouldn't break
+    analytics. Lexicographic sort on the raw RFC 3339 string would be
+    wrong when entries use mixed offset forms — e.g.
+    ``2026-05-09T10:30:00Z`` and ``2026-05-09T12:00:00+02:00``
+    represent the same UTC instant 10:00 / 10:30, but the string sort
+    flips them. Parse to aware datetimes for comparison so the
+    comparison reflects the actual instant. The returned dict keeps
+    its original ``occurred_at`` string verbatim — we only normalize
+    for the ordering decision, not for downstream consumers.
+
+    Tiebreak / fallback:
+      * Entries whose ``occurred_at`` is missing or unparseable sort
+        behind all valid entries.
+      * Among entries with equal parsed timestamps (rare but possible
+        in batched deliveries), later array position wins — preserving
+        the append-only ordering.
+      * If no entry has a parseable ``occurred_at``, fall back to the
+        last array position so we still surface *something* rather
+        than dropping the column entirely.
+    """
+    if not isinstance(items, list) or not items:
+        return None
+    valid = [x for x in items if isinstance(x, dict)]
+    if not valid:
+        return None
+    parsed = [(item, _parse_occurred_at(item.get("occurred_at"))) for item in valid]
+    dated = [(item, ts) for item, ts in parsed if ts is not None]
+    if dated:
+        # Iterate so that later array positions win on equal timestamps
+        # (`>=` instead of `>`). Append-only contract means later
+        # position in the array is later in chronological order when
+        # the wire timestamp ties.
+        latest_item, latest_ts = dated[0]
+        for item, ts in dated[1:]:
+            if ts >= latest_ts:
+                latest_item, latest_ts = item, ts
+        return latest_item
+    # No parseable timestamps — fall back to the last array entry.
+    return valid[-1]
+
+
+def _lifecycle_event_from_order_body(body: dict) -> Optional[UCPEventType]:
+    """Derive an ORDER_* lifecycle event type from a new-shape order body.
+
+    Priority:
+      1. `fulfillment.events[]` latest entry's `type` — authoritative
+         shipment state (delivered overrides shipped overrides in_transit).
+      2. `adjustments[]` latest entry's `type` — post-order events
+         (return, refund, cancellation) when no fulfillment event
+         carries lifecycle info.
+      3. Legacy top-level `status` — pre-c5c6139 payloads / senders
+         that still ship the flat shape.
+
+    Returns None when none of the above identify a known lifecycle
+    transition; the caller then falls back to ORDER_WEBHOOK_RECEIVED
+    (B5b) or ORDER_UPDATED (REST PUT).
+    """
+    fulfillment = body.get("fulfillment")
+    if isinstance(fulfillment, dict):
+        latest = _latest_by_occurred_at(fulfillment.get("events"))
+        if latest:
+            event = _FULFILLMENT_EVENT_TYPE_TO_EVENT.get(
+                str(latest.get("type") or "").lower()
+            )
+            if event:
+                return event
+
+    latest_adj = _latest_by_occurred_at(body.get("adjustments"))
+    if latest_adj:
+        event = _ADJUSTMENT_TYPE_TO_EVENT.get(str(latest_adj.get("type") or "").lower())
+        if event:
+            return event
+
+    # Legacy top-level status (pre-c5c6139). Kept as a fallback so
+    # senders that still ship the flat shape continue to classify
+    # correctly; new-shape senders override via the branches above.
+    legacy_status = body.get("status", "")
+    if legacy_status == "shipped":
+        return UCPEventType.ORDER_SHIPPED
+    if legacy_status == "delivered":
+        return UCPEventType.ORDER_DELIVERED
+    if legacy_status == "returned":
+        return UCPEventType.ORDER_RETURNED
+    if legacy_status in ("canceled", "cancelled"):
+        return UCPEventType.ORDER_CANCELED
+
+    return None
 
 
 class UCPResponseParser:
@@ -127,21 +280,6 @@ class UCPResponseParser:
             if re.search(r"/catalog/product/?$", p):
                 return UCPEventType.CATALOG_PRODUCT_GET
 
-        # /orders (strict: /orders or /orders/{id}, not /reorder etc.)
-        if re.search(r"/orders(?:/[^/]+)?$", p):
-            if m == "POST":
-                return UCPEventType.ORDER_CREATED
-            # Check response body status for order lifecycle events
-            if response_body and isinstance(response_body, dict):
-                order_status = response_body.get("status", "")
-                if order_status == "delivered":
-                    return UCPEventType.ORDER_DELIVERED
-                if order_status == "returned":
-                    return UCPEventType.ORDER_RETURNED
-                if order_status in ("canceled", "cancelled"):
-                    return UCPEventType.ORDER_CANCELED
-            return UCPEventType.ORDER_UPDATED
-
         # Order webhook detection. UCP `order.md` says the URL format
         # is platform-specific, so we can't rely on a fixed `/webhooks`
         # prefix. Two signals enter this branch:
@@ -152,6 +290,15 @@ class UCPResponseParser:
         #      regardless of URL. UCP `order.md` requires both on
         #      every order-event webhook.
         # Either alone is sufficient; together they're the same branch.
+        #
+        # Webhook detection runs BEFORE the `/orders` REST branch so a
+        # platform that advertises `/webhooks/orders` as its webhook
+        # URL classifies as a webhook (the more-specific signal) rather
+        # than as a REST `/orders` endpoint (which the trailing
+        # `/orders$` regex would otherwise match). `is_webhook_delivery`
+        # suppresses on known UCP REST paths, so plain `/orders/{id}`
+        # without webhook headers still falls through to the REST
+        # branch below.
         if is_webhook_delivery(p, request_headers, webhook_path_prefixes):
             # Webhook errors still classify as errors.
             if status_code and status_code >= 400:
@@ -166,21 +313,15 @@ class UCPResponseParser:
                 else response_body
             )
             if body and isinstance(body, dict):
-                order_status = body.get("status", "")
-                if order_status == "shipped":
-                    return UCPEventType.ORDER_SHIPPED
-                if order_status == "delivered":
-                    return UCPEventType.ORDER_DELIVERED
-                if order_status == "returned":
-                    return UCPEventType.ORDER_RETURNED
-                if order_status in ("canceled", "cancelled"):
-                    return UCPEventType.ORDER_CANCELED
+                lifecycle = _lifecycle_event_from_order_body(body)
+                if lifecycle:
+                    return lifecycle
             # Legacy URL-segment fallback for senders that don't
-            # include status in the body. Kept for back-compat with
-            # platforms that still publish `/webhooks/order-delivered`-
-            # style URLs; the body-driven path above takes precedence
-            # so a sender that includes status overrides the URL
-            # heuristic.
+            # include status (or fulfillment.events[]) in the body.
+            # Kept for back-compat with platforms that still publish
+            # `/webhooks/order-delivered`-style URLs; the body-driven
+            # path above takes precedence so a new-shape sender that
+            # includes fulfillment.events overrides the URL heuristic.
             if re.search(r"/order[_-]delivered", p):
                 return UCPEventType.ORDER_DELIVERED
             if re.search(r"/order[_-]returned", p):
@@ -195,6 +336,20 @@ class UCPResponseParser:
             # are platform→business with signing; REST updates are
             # business→platform).
             return UCPEventType.ORDER_WEBHOOK_RECEIVED
+
+        # /orders (strict: /orders or /orders/{id}, not /reorder etc.)
+        if re.search(r"/orders(?:/[^/]+)?$", p):
+            if m == "POST":
+                return UCPEventType.ORDER_CREATED
+            # Lifecycle derivation: prefer the new-shape
+            # `fulfillment.events[]` / `adjustments[]` arrays (c5c6139)
+            # and fall back to legacy top-level `status`. The helper
+            # encapsulates all three branches.
+            if response_body and isinstance(response_body, dict):
+                lifecycle = _lifecycle_event_from_order_body(response_body)
+                if lifecycle:
+                    return lifecycle
+            return UCPEventType.ORDER_UPDATED
 
         # Identity linking (strict: /identity, /oauth, or /oauth2 paths).
         # The trailing oauth2? in the regex is necessary because /oauth
@@ -395,6 +550,13 @@ class UCPResponseParser:
 
         # --- fulfillment extension ---
         cls._extract_fulfillment(body.get("fulfillment"), result)
+
+        # --- order lifecycle (B8): fulfillment.events[] + adjustments[] ---
+        # At c5c6139 the order has no top-level `status`; lifecycle
+        # lives in two append-only arrays. We preserve both verbatim
+        # as JSON columns and derive narrow "latest" scalars for
+        # fast-pivot dashboards.
+        cls._extract_order_lifecycle(body, result)
 
         # --- discount extension ---
         cls._extract_discounts(body.get("discounts"), result)
@@ -793,6 +955,90 @@ class UCPResponseParser:
                     result["fulfillment_destination_country"] = dest.get(
                         "address_country"
                     )
+
+    @classmethod
+    def _extract_order_lifecycle(cls, body: dict, result: Dict[str, Any]) -> None:
+        """Capture `fulfillment.events[]` + `adjustments[]` for orders.
+
+        At UCP `order.md`/`c5c6139` the order has no top-level `status`.
+        Lifecycle lives in two append-only arrays:
+
+          * `fulfillment.events[]` — actual shipment events
+            (processing, shipped, in_transit, delivered, failed_attempt,
+            canceled, undeliverable, returned_to_sender). Per
+            `fulfillment_event.json` each entry carries an `id`,
+            `occurred_at` (RFC 3339), `type` (open string), `line_items[]`,
+            and optional `tracking_*` / `carrier` / `description`.
+          * `adjustments[]` — post-order events independent of fulfillment
+            (refunds, returns, credits, price_adjustment, dispute,
+            cancellation). Per `adjustment.json` each entry has an `id`,
+            `type` (open string), `occurred_at`, `status`
+            (pending/completed/failed), optional `line_items[]`,
+            `totals[]`, `description`.
+
+        We dump both arrays verbatim into JSON columns so dashboards
+        can compute multi-event KPIs (e.g., time from shipped to
+        delivered, refund-rate over time) directly via
+        ``JSON_QUERY_ARRAY``. We also surface narrow "latest" scalars
+        for the common "current state" pivot, picked by latest
+        ``occurred_at``.
+        """
+        if not isinstance(body, dict):
+            return
+
+        fulfillment = body.get("fulfillment")
+        if isinstance(fulfillment, dict):
+            events = fulfillment.get("events")
+            if isinstance(events, list) and events:
+                # Filter to dicts to avoid serializing malformed entries
+                # that would break JSON_QUERY downstream. We keep the
+                # array length so analysts can see counts that include
+                # the malformed entries if needed by walking
+                # messages_json — but for this column we ship clean.
+                clean = [e for e in events if isinstance(e, dict)]
+                if clean:
+                    result["fulfillment_events_json"] = json.dumps(clean, default=str)
+                latest = _latest_by_occurred_at(events)
+                if latest:
+                    event_type = latest.get("type")
+                    if isinstance(event_type, str) and event_type:
+                        result["latest_fulfillment_event_type"] = event_type
+                    # Only write the TIMESTAMP column when the value
+                    # parses as a real RFC 3339 instant. The latest_*
+                    # entry can come from the array-position fallback
+                    # (no parseable timestamps in the array), in which
+                    # case its raw `occurred_at` string would land in
+                    # a BigQuery TIMESTAMP column and reject the entire
+                    # row. Type / status columns still populate so the
+                    # row stays useful even when timestamps are bad.
+                    occurred_at = latest.get("occurred_at")
+                    if (
+                        isinstance(occurred_at, str)
+                        and occurred_at
+                        and _parse_occurred_at(occurred_at) is not None
+                    ):
+                        result["latest_fulfillment_event_at"] = occurred_at
+
+        adjustments = body.get("adjustments")
+        if isinstance(adjustments, list) and adjustments:
+            clean = [a for a in adjustments if isinstance(a, dict)]
+            if clean:
+                result["adjustments_json"] = json.dumps(clean, default=str)
+            latest = _latest_by_occurred_at(adjustments)
+            if latest:
+                adj_type = latest.get("type")
+                if isinstance(adj_type, str) and adj_type:
+                    result["latest_adjustment_type"] = adj_type
+                adj_status = latest.get("status")
+                if isinstance(adj_status, str) and adj_status:
+                    result["latest_adjustment_status"] = adj_status
+                occurred_at = latest.get("occurred_at")
+                if (
+                    isinstance(occurred_at, str)
+                    and occurred_at
+                    and _parse_occurred_at(occurred_at) is not None
+                ):
+                    result["latest_adjustment_at"] = occurred_at
 
     @classmethod
     def _extract_discounts(cls, discounts: Any, result: Dict[str, Any]) -> None:
