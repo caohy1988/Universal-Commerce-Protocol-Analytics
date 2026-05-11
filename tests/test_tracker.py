@@ -344,6 +344,234 @@ class TestRecordHttp:
         assert event.request_signature_keyid == "upper-K"
         assert event.response_signature_keyid == "mixed-K"
 
+    # ---- C5c: signature algorithm per direction via jwk_lookup ----
+
+    async def test_no_jwk_lookup_leaves_alg_columns_none(self, tracker, mock_writer):
+        """Default tracker has no jwk_lookup; the alg columns stay
+        None even when a fully signed exchange is recorded. Pinned so
+        the new column doesn't accidentally infer alg from anything
+        other than the JWK lookup."""
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            request_headers={
+                "signature-input": 'sig1=();keyid="merchant-K"',
+                "signature": "sig1=:abc==:",
+            },
+            response_headers={
+                "signature-input": 'sig1=();keyid="platform-K"',
+                "signature": "sig1=:def==:",
+            },
+        )
+        assert event.request_signature_keyid == "merchant-K"
+        assert event.response_signature_keyid == "platform-K"
+        # No lookup → no alg.
+        assert event.request_signature_alg is None
+        assert event.response_signature_alg is None
+
+    async def test_request_side_alg_derived_from_jwk_lookup(self, mock_writer):
+        """Per-direction derivation: the request-side keyid resolves
+        to a P-256 JWK → ES256 populates request_signature_alg."""
+        jwks = {"merchant-K": {"kty": "EC", "crv": "P-256"}}
+        tracker = UCPAnalyticsTracker(
+            project_id="test",
+            app_name="test_app",
+            jwk_lookup=jwks.get,
+        )
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            request_headers={
+                "signature-input": 'sig1=();keyid="merchant-K"',
+                "signature": "sig1=:abc==:",
+            },
+        )
+        assert event.request_signature_alg == "ES256"
+        # No response-side signature → response alg stays None.
+        assert event.response_signature_alg is None
+
+    async def test_response_side_alg_derived_independently(self, mock_writer):
+        """Request and response can be signed by different parties
+        with different curves. Pin that a P-256 request and a P-384
+        response each derive their own alg without crosstalk."""
+        jwks = {
+            "merchant-K": {"kty": "EC", "crv": "P-256"},
+            "platform-K": {"kty": "EC", "crv": "P-384"},
+        }
+        tracker = UCPAnalyticsTracker(
+            project_id="test",
+            app_name="test_app",
+            jwk_lookup=jwks.get,
+        )
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            request_headers={
+                "signature-input": 'sig1=();keyid="merchant-K"',
+                "signature": "sig1=:abc==:",
+            },
+            response_headers={
+                "signature-input": 'sig1=();keyid="platform-K"',
+                "signature": "sig1=:def==:",
+            },
+        )
+        assert event.request_signature_alg == "ES256"
+        assert event.response_signature_alg == "ES384"
+
+    async def test_unknown_keyid_lookup_misses_alg_stays_none(self, mock_writer):
+        """jwk_lookup returns None for an unknown keyid → alg column
+        stays None. Distinct from "no lookup configured" — both end
+        up NULL on the row, but the operator can tell from the
+        application's JWKS source which case applies."""
+        jwks = {"known-K": {"kty": "EC", "crv": "P-256"}}
+        tracker = UCPAnalyticsTracker(
+            project_id="test",
+            app_name="test_app",
+            jwk_lookup=jwks.get,
+        )
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            request_headers={
+                "signature-input": 'sig1=();keyid="unknown-K"',
+                "signature": "sig1=:abc==:",
+            },
+        )
+        assert event.request_signature_keyid == "unknown-K"
+        assert event.request_signature_alg is None
+
+    async def test_unknown_curve_alg_stays_none(self, mock_writer):
+        """JWK is found but its curve doesn't map to any JWA alg
+        (and no `alg` fallback on the JWK itself) → column stays
+        None. Pinned so a future P-521 deployment doesn't silently
+        record the wrong alg via some default."""
+        jwks = {"merchant-K": {"kty": "EC", "crv": "P-521"}}
+        tracker = UCPAnalyticsTracker(
+            project_id="test",
+            app_name="test_app",
+            jwk_lookup=jwks.get,
+        )
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            request_headers={
+                "signature-input": 'sig1=();keyid="merchant-K"',
+                "signature": "sig1=:abc==:",
+            },
+        )
+        assert event.request_signature_keyid == "merchant-K"
+        assert event.request_signature_alg is None
+
+    async def test_no_signature_headers_no_alg_lookup(self, mock_writer):
+        """Plain unsigned exchange — no keyid to resolve, so we never
+        call jwk_lookup. Pin no-call so a buggy JWKS source can't be
+        invoked on traffic that isn't signed in the first place."""
+        from unittest.mock import MagicMock
+
+        jwk_lookup = MagicMock(return_value=None)
+        tracker = UCPAnalyticsTracker(
+            project_id="test",
+            app_name="test_app",
+            jwk_lookup=jwk_lookup,
+        )
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            request_headers={},
+            response_headers={},
+        )
+        jwk_lookup.assert_not_called()
+        assert event.request_signature_alg is None
+        assert event.response_signature_alg is None
+
+    async def test_half_signed_request_does_not_record_alg(self, mock_writer):
+        """#12 intentionally extracts the keyid even from a half-signed
+        exchange (Signature-Input without Signature) for forensics.
+        That row records `request_signed=False` with a populated
+        `request_signature_keyid`. The alg column MUST stay None on
+        such rows -- recording an alg there would make the row look
+        like signed crypto-agility data on an unsigned exchange.
+
+        Pin the gating so the alg column is only populated when the
+        full Signature pair is present (`request_signed=True`)."""
+        jwks = {"merchant-K": {"kty": "EC", "crv": "P-256"}}
+        tracker = UCPAnalyticsTracker(
+            project_id="test",
+            app_name="test_app",
+            jwk_lookup=jwks.get,
+        )
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            request_headers={
+                # Half-signed: Signature-Input present, Signature missing.
+                "signature-input": 'sig1=();keyid="merchant-K"',
+            },
+        )
+        # #12 still captures the keyid for forensics.
+        assert event.request_signature_keyid == "merchant-K"
+        # But the row isn't actually signed.
+        assert event.request_signed is False
+        # And alg must stay None -- no crypto-agility signal on
+        # incomplete signature pairs.
+        assert event.request_signature_alg is None
+
+    async def test_half_signed_response_does_not_record_alg(self, mock_writer):
+        """Mirror of the half-signed request test on the response side."""
+        jwks = {"platform-K": {"kty": "EC", "crv": "P-384"}}
+        tracker = UCPAnalyticsTracker(
+            project_id="test",
+            app_name="test_app",
+            jwk_lookup=jwks.get,
+        )
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            response_headers={
+                # Signature without Signature-Input metadata.
+                "signature": "sig1=:abc==:",
+                # Intentionally NO signature-input, so response_signed=False.
+            },
+        )
+        assert event.response_signed is False
+        # No keyid either (it lives in Signature-Input).
+        assert event.response_signature_keyid is None
+        assert event.response_signature_alg is None
+
+    async def test_jwk_lookup_exception_swallowed(self, mock_writer):
+        """A flaky JWKS source (network error, cache miss, etc.) must
+        not take down the analytics row. Exception is caught, logged,
+        and the alg column stays None."""
+
+        def broken_lookup(keyid):
+            raise RuntimeError("JWKS server down")
+
+        tracker = UCPAnalyticsTracker(
+            project_id="test",
+            app_name="test_app",
+            jwk_lookup=broken_lookup,
+        )
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            request_headers={
+                "signature-input": 'sig1=();keyid="merchant-K"',
+                "signature": "sig1=:abc==:",
+            },
+        )
+        # The row still records — keyid captured, alg stays None.
+        assert event.request_signature_keyid == "merchant-K"
+        assert event.request_signature_alg is None
+
     # --- Standard Webhooks metadata (UCP order.md) ---
 
     async def test_webhook_headers_extracted_from_request_side(

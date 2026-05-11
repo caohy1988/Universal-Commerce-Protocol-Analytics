@@ -68,6 +68,26 @@ class TestUCPEvent:
         assert row["eligibility_not_accepted_present"] is False
         assert row["eligibility_invalid_present"] is False
 
+    def test_signature_alg_fields_default_none(self):
+        """C5c — per-direction algorithm columns default to None so
+        rows without a configured jwk_lookup don't pollute the
+        "signed with alg X" dashboards."""
+        event = UCPEvent()
+        assert event.request_signature_alg is None
+        assert event.response_signature_alg is None
+        row = event.to_bq_row()
+        assert "request_signature_alg" not in row
+        assert "response_signature_alg" not in row
+
+    def test_signature_alg_fields_serialize_when_set(self):
+        event = UCPEvent(
+            request_signature_alg="ES256",
+            response_signature_alg="ES384",
+        )
+        row = event.to_bq_row()
+        assert row["request_signature_alg"] == "ES256"
+        assert row["response_signature_alg"] == "ES384"
+
     def test_order_lifecycle_fields_default_none(self):
         """B8 — fulfillment.events[] / adjustments[] columns default
         to None so rows without lifecycle data don't appear in

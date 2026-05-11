@@ -9,12 +9,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 from urllib.parse import urlparse
 
 from ucp_analytics._headers import (
     is_signed,
     parse_bearer_challenge,
+    signature_alg_from_jwk,
     signature_keyid,
     ucp_agent_profile_url,
     webhook_id,
@@ -70,6 +71,7 @@ class UCPAnalyticsTracker:
         pii_fields: Optional[List[str]] = None,
         custom_metadata: Optional[Dict[str, str]] = None,
         webhook_path_prefixes: Optional[List[str]] = None,
+        jwk_lookup: Optional[Callable[[str], Optional[Mapping[str, Any]]]] = None,
     ):
         self.app_name = app_name
         self.redact_pii = redact_pii
@@ -94,6 +96,19 @@ class UCPAnalyticsTracker:
         # even when the path is unknown, so this list is a
         # noise-suppression knob more than a coverage knob.
         self.webhook_path_prefixes: tuple = tuple(webhook_path_prefixes or ())
+        # C5c: jwk_lookup is an operator-provided callable that maps a
+        # keyid to its JWK (the dict with `kty`, `crv`, optional `alg`,
+        # etc.). UCP `signatures.md` derives the signing algorithm
+        # from the JWK's `crv` field, not from `Signature-Input`, so
+        # we need a way to reach the JWK. The callable shape lets
+        # operators delegate to whatever JWK source they already have
+        # (a cached /.well-known/ucp fetch, a Vault lookup, a static
+        # rotation table, etc.). Defaults to None — when absent,
+        # request_signature_alg / response_signature_alg stay NULL,
+        # preserving the existing "signed: yes/no by keyid X" KPI.
+        self.jwk_lookup: Optional[Callable[[str], Optional[Mapping[str, Any]]]] = (
+            jwk_lookup
+        )
 
         self._writer = AsyncBigQueryWriter(
             project_id=project_id,
@@ -231,6 +246,33 @@ class UCPAnalyticsTracker:
             event.auth_challenge_realm = challenge.get("realm")
             event.auth_challenge_resource_metadata = challenge.get("resource_metadata")
 
+        # C5c: signature algorithm per direction. UCP `signatures.md`:
+        # *"The algorithm is derived from the key's `crv` field in the
+        # JWK; `alg` is NOT included in `Signature-Input` parameters"*.
+        # We need the keyid (already extracted above) plus a JWK
+        # source — the operator-supplied jwk_lookup callable. Per
+        # direction so request and response can be signed by different
+        # parties using different keys / curves.
+        #
+        # Gated on `is_signed=True` (full Signature-Input + Signature
+        # pair present). #12 intentionally extracts the keyid from
+        # half-signed traffic for forensics — a request that ships
+        # Signature-Input without Signature gets `request_signed=False`
+        # and a non-null `request_signature_keyid`. Deriving the alg
+        # for that case would make the column look like signed
+        # crypto-agility data on an unsigned/incomplete exchange.
+        # Keep keyid extraction unconditional; gate alg to fully
+        # signed only.
+        if self.jwk_lookup is not None:
+            if event.request_signed:
+                event.request_signature_alg = self._resolve_signature_alg(
+                    event.request_signature_keyid
+                )
+            if event.response_signed:
+                event.response_signature_alg = self._resolve_signature_alg(
+                    event.response_signature_keyid
+                )
+
         # Extract UCP fields from both request and response bodies.
         # Response takes precedence on conflict (it's the merchant-
         # confirmed state) but request-body-only fields — the new
@@ -324,6 +366,29 @@ class UCPAnalyticsTracker:
     async def flush(self):
         """Force flush buffered events to BigQuery."""
         await self._writer.flush()
+
+    def _resolve_signature_alg(self, keyid: Optional[str]) -> Optional[str]:
+        """Resolve a keyid to its JWA algorithm via the configured lookup.
+
+        Returns None on any failure path so the column stays NULL —
+        we explicitly distinguish "no alg recorded" from "wrong alg":
+          * `keyid` missing → no signature to resolve
+          * `jwk_lookup` not configured → operator opted out
+          * `jwk_lookup` returned None → unknown keyid
+          * JWK returned but `crv` doesn't map and no `alg` fallback
+            → unknown curve
+
+        Lookup callable errors are swallowed and logged; a flaky JWKS
+        source must not take down analytics rows.
+        """
+        if not keyid or self.jwk_lookup is None:
+            return None
+        try:
+            jwk = self.jwk_lookup(keyid)
+        except Exception:
+            logger.exception("UCP analytics jwk_lookup failed for keyid=%s", keyid)
+            return None
+        return signature_alg_from_jwk(jwk)
 
     def register_pending_task(self, task: asyncio.Task) -> None:
         """Track a fire-and-forget task (used by middleware).

@@ -11,6 +11,7 @@ from ucp_analytics._headers import (
     is_signed,
     lookup_header,
     parse_bearer_challenge,
+    signature_alg_from_jwk,
     signature_keyid,
     ucp_agent_profile_url,
     webhook_id,
@@ -139,6 +140,82 @@ class TestSignatureKeyid:
         # `keyid` must be its own structured-field parameter; a header
         # with only other parameters (no keyid) returns None.
         assert signature_keyid({"Signature-Input": 'sig1=();foo="bar"'}) is None
+
+
+class TestSignatureAlgFromJwk:
+    """C5c — UCP signatures.md derives the signing algorithm from
+    the JWK's `crv` field, NOT from `Signature-Input` parameters.
+    `signature_alg_from_jwk` is the pure mapping helper that callers
+    invoke after looking up the JWK by keyid."""
+
+    def test_p256_curve_maps_to_es256(self):
+        assert (
+            signature_alg_from_jwk(
+                {"kty": "EC", "crv": "P-256", "x": "...", "y": "..."}
+            )
+            == "ES256"
+        )
+
+    def test_p384_curve_maps_to_es384(self):
+        assert (
+            signature_alg_from_jwk(
+                {"kty": "EC", "crv": "P-384", "x": "...", "y": "..."}
+            )
+            == "ES384"
+        )
+
+    def test_unknown_curve_returns_none_without_alg_fallback(self):
+        # Curve isn't mapped and no `alg` fallback is present →
+        # NULL on the analytics column. Distinguishes "we couldn't
+        # determine alg" from "alg is ES256".
+        assert (
+            signature_alg_from_jwk(
+                {"kty": "EC", "crv": "P-521", "x": "...", "y": "..."}
+            )
+            is None
+        )
+
+    def test_unknown_curve_returns_none_even_with_alg_field_present(self):
+        # No fallback to the JWK's `alg` field on an unknown curve.
+        # `alg` is operator-controlled metadata that doesn't have to
+        # agree with the curve — a fallback would misrepresent
+        # unsigned/wrong-curve cases as well-formed crypto. Future
+        # curve support (Ed25519 -> EdDSA, P-521 -> ES512) must be
+        # an explicit addition to _CRV_TO_ALG so the column stays
+        # NULL until each curve is reviewed.
+        assert (
+            signature_alg_from_jwk(
+                {"kty": "OKP", "crv": "Ed25519", "alg": "EdDSA", "x": "..."}
+            )
+            is None
+        )
+        assert (
+            signature_alg_from_jwk({"kty": "EC", "crv": "P-521", "alg": "ES512"})
+            is None
+        )
+
+    def test_known_curve_ignores_conflicting_alg(self):
+        # Spec says derive from `crv` — if a JWK ships P-256 with
+        # a conflicting `alg: HS256`, the curve wins.
+        assert (
+            signature_alg_from_jwk({"kty": "EC", "crv": "P-256", "alg": "HS256"})
+            == "ES256"
+        )
+
+    def test_none_jwk_returns_none(self):
+        assert signature_alg_from_jwk(None) is None
+
+    def test_non_mapping_jwk_returns_none(self):
+        # A flaky JWKS source might hand back a string / list /
+        # other shape; we shouldn't crash.
+        assert signature_alg_from_jwk("not-a-jwk") is None
+        assert signature_alg_from_jwk(["EC", "P-256"]) is None
+
+    def test_empty_jwk_returns_none(self):
+        assert signature_alg_from_jwk({}) is None
+
+    def test_non_string_crv_returns_none(self):
+        assert signature_alg_from_jwk({"crv": 42}) is None
 
 
 class TestWebhookId:

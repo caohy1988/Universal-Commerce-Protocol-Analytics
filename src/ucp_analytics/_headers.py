@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from typing import Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional
 
 # RFC 9421 §2.3 — Signature-Input is a Structured Field Dictionary whose
 # values carry a `keyid` parameter as a quoted string. Multiple sig
@@ -297,3 +297,42 @@ def signature_keyid(headers: Optional[Mapping[str, str]]) -> Optional[str]:
         return None
     match = _SIGNATURE_INPUT_KEYID_RE.search(raw)
     return match.group(1) if match else None
+
+
+# UCP `signatures.md` derives the signing algorithm from the matched
+# JWK's `crv` field rather than the RFC 9421 `Signature-Input` params:
+# *"The algorithm is derived from the key's `crv` field in the JWK;
+# `alg` is NOT included in `Signature-Input` parameters"*. JWA names
+# follow JWS conventions: P-256 + ECDSA + SHA-256 = ES256, P-384 +
+# ECDSA + SHA-384 = ES384.
+_CRV_TO_ALG = {
+    "P-256": "ES256",
+    "P-384": "ES384",
+}
+
+
+def signature_alg_from_jwk(jwk: Optional[Mapping[str, Any]]) -> Optional[str]:
+    """Derive the JWS signing algorithm from a JWK.
+
+    Returns the JWA algorithm name (``ES256`` / ``ES384``) for the
+    JWK, or None when the curve isn't in the explicit mapping. UCP
+    `signatures.md` requires the algorithm to be derived from `crv`;
+    we do NOT fall back to the JWK's optional `alg` field on an
+    unknown curve. The reason: `alg` is operator-controlled metadata
+    that doesn't have to agree with the curve, so a fallback would
+    misrepresent unsigned/wrong-curve cases as well-formed crypto.
+    Future curve support (Ed25519 -> EdDSA, P-521 -> ES512, etc.)
+    must be added as an explicit entry to ``_CRV_TO_ALG`` so the
+    column stays NULL until each curve is reviewed.
+
+    Returns None on a missing / non-dict / unknown-curve JWK so the
+    caller's column stays NULL — preserving the three-state
+    "we don't know the alg" semantic distinct from "we know it's
+    ES256".
+    """
+    if not isinstance(jwk, Mapping):
+        return None
+    crv = jwk.get("crv")
+    if isinstance(crv, str):
+        return _CRV_TO_ALG.get(crv)
+    return None
