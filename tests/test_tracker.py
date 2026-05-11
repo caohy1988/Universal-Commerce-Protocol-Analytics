@@ -783,6 +783,87 @@ class TestRecordHttp:
         # Classification stays on the REST taxonomy.
         assert event.event_type == "checkout_session_created"
 
+    async def test_new_shape_order_webhook_classifies_via_fulfillment_events(
+        self, tracker, mock_writer
+    ):
+        """B8 end-to-end: a c5c6139-shaped order webhook with no top-
+        level `status` but with a `delivered` fulfillment event must
+        classify as ORDER_DELIVERED through record_http (not
+        ORDER_WEBHOOK_RECEIVED, which would be the B5b regression
+        without B8). Also pins that the JSON + latest_* columns
+        populate."""
+        event = await tracker.record_http(
+            method="POST",
+            url="https://platform.example.com/webhooks/orders",
+            status_code=200,
+            request_headers={
+                "Webhook-Id": "evt_42",
+                "Webhook-Timestamp": "1767225600",
+            },
+            request_body={
+                "id": "order_xyz",
+                "checkout_id": "chk_a",
+                "fulfillment": {
+                    "events": [
+                        {
+                            "id": "fe_1",
+                            "occurred_at": "2026-05-08T08:00:00Z",
+                            "type": "shipped",
+                            "line_items": [{"id": "li_1", "quantity": 1}],
+                        },
+                        {
+                            "id": "fe_2",
+                            "occurred_at": "2026-05-09T17:00:00Z",
+                            "type": "delivered",
+                            "line_items": [{"id": "li_1", "quantity": 1}],
+                        },
+                    ],
+                },
+            },
+        )
+        # Classifier picked the latest event's lifecycle.
+        assert event.event_type == "order_delivered"
+        # Latest-event scalars populated.
+        assert event.latest_fulfillment_event_type == "delivered"
+        assert event.latest_fulfillment_event_at == "2026-05-09T17:00:00Z"
+        # Full array preserved for downstream queries.
+        events = json.loads(event.fulfillment_events_json)
+        assert len(events) == 2
+        assert events[0]["id"] == "fe_1"
+        assert events[1]["id"] == "fe_2"
+
+    async def test_adjustment_only_webhook_classifies_as_returned(
+        self, tracker, mock_writer
+    ):
+        """Refund-only webhook (no fulfillment events). Adjustment
+        path drives lifecycle when fulfillment is empty."""
+        event = await tracker.record_http(
+            method="POST",
+            url="https://platform.example.com/webhooks/orders",
+            status_code=200,
+            request_headers={
+                "Webhook-Id": "evt_99",
+                "Webhook-Timestamp": "1767225600",
+            },
+            request_body={
+                "id": "order_xyz",
+                "checkout_id": "chk_a",
+                "adjustments": [
+                    {
+                        "id": "adj_1",
+                        "type": "refund",
+                        "occurred_at": "2026-05-09T20:00:00Z",
+                        "status": "completed",
+                        "description": "Defective item",
+                    },
+                ],
+            },
+        )
+        assert event.event_type == "order_returned"
+        assert event.latest_adjustment_type == "refund"
+        assert event.latest_adjustment_status == "completed"
+        assert event.latest_adjustment_at == "2026-05-09T20:00:00Z"
+
     async def test_webhook_received_when_no_lifecycle_status(
         self, tracker, mock_writer
     ):

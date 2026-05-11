@@ -68,6 +68,39 @@ class TestUCPEvent:
         assert row["eligibility_not_accepted_present"] is False
         assert row["eligibility_invalid_present"] is False
 
+    def test_order_lifecycle_fields_default_none(self):
+        """B8 — fulfillment.events[] / adjustments[] columns default
+        to None so rows without lifecycle data don't appear in
+        COUNT(latest_*) denominators."""
+        event = UCPEvent()
+        assert event.fulfillment_events_json is None
+        assert event.adjustments_json is None
+        assert event.latest_fulfillment_event_type is None
+        assert event.latest_fulfillment_event_at is None
+        assert event.latest_adjustment_type is None
+        assert event.latest_adjustment_status is None
+        assert event.latest_adjustment_at is None
+        row = event.to_bq_row()
+        assert "fulfillment_events_json" not in row
+        assert "adjustments_json" not in row
+        assert "latest_fulfillment_event_type" not in row
+
+    def test_order_lifecycle_fields_serialize_when_set(self):
+        event = UCPEvent(
+            fulfillment_events_json='[{"id": "fe_1"}]',
+            latest_fulfillment_event_type="delivered",
+            latest_fulfillment_event_at="2026-05-09T17:00:00Z",
+            latest_adjustment_type="refund",
+            latest_adjustment_status="completed",
+            latest_adjustment_at="2026-05-09T20:00:00Z",
+        )
+        row = event.to_bq_row()
+        assert row["latest_fulfillment_event_type"] == "delivered"
+        assert row["latest_fulfillment_event_at"] == "2026-05-09T17:00:00Z"
+        assert row["latest_adjustment_type"] == "refund"
+        assert row["latest_adjustment_status"] == "completed"
+        assert row["latest_adjustment_at"] == "2026-05-09T20:00:00Z"
+
 
 class TestEnums:
     def test_event_type_values(self):
