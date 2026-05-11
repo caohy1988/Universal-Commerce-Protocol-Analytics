@@ -1264,6 +1264,215 @@ class TestRecordHttp:
         assert event.context_intent == "browsing"
 
 
+class TestAp2MandateRawCapture:
+    """A4 — opt-in `include_ap2_raw=True` surfaces the raw `body.ap2`
+    object into `ap2_mandate_raw_json` AFTER passing through
+    `_redact`. Default-off; credentials redacted even when the
+    operator hasn't enabled `redact_pii` generally."""
+
+    _MERCHANT_AUTH = "eyJhbGciOiJFUzI1NiIsImtpZCI6Im1lcmNoYW50LWtleS0xIn0..sig"
+    _CHECKOUT_MANDATE = (
+        "eyJhbGciOiJFUzI1NiIsImtpZCI6ImJ1eWVyLWtleSIsInR5cCI6InZjK3NkLWp3dCJ9"
+        ".eyJjbGFpbXMiOiJzZW5zaXRpdmUifQ.sig~disclosure1~disclosure2"
+    )
+
+    async def test_raw_absent_by_default(self, tracker, mock_writer):
+        """Default tracker (no `include_ap2_raw`) leaves the raw
+        column None even when a full AP2 body is present. Pinned so
+        operators have to opt in to credential capture."""
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            response_body={
+                "id": "chk_123",
+                "ap2": {
+                    "merchant_authorization": self._MERCHANT_AUTH,
+                    "checkout_mandate": self._CHECKOUT_MANDATE,
+                },
+            },
+        )
+        # Safe defaults still populate (these are non-PII).
+        assert event.ap2_mandate_present is True
+        # But the raw column is NULL.
+        assert event.ap2_mandate_raw_json is None
+
+    async def test_raw_opt_in_redacts_credential_strings(self, mock_writer):
+        """With `include_ap2_raw=True`, the raw column populates BUT
+        the credential strings are scrubbed via `_redact`. The
+        credential field names appear (so dashboards can confirm
+        which mandates were present) but the credential values are
+        `[REDACTED]`. Acceptance for the issue #8 requirement:
+        'redaction must redact them before BQ insert'."""
+        tracker = UCPAnalyticsTracker(
+            project_id="test",
+            include_ap2_raw=True,
+        )
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            response_body={
+                "id": "chk_123",
+                "ap2": {
+                    "merchant_authorization": self._MERCHANT_AUTH,
+                    "checkout_mandate": self._CHECKOUT_MANDATE,
+                },
+            },
+        )
+        assert event.ap2_mandate_raw_json is not None
+        raw = json.loads(event.ap2_mandate_raw_json)
+        # Credential field names preserved.
+        assert "merchant_authorization" in raw
+        assert "checkout_mandate" in raw
+        # But values are REDACTED — the raw credential strings must
+        # never appear in the column.
+        assert raw["merchant_authorization"] == "[REDACTED]"
+        assert raw["checkout_mandate"] == "[REDACTED]"
+        # And the credential strings absolutely don't appear anywhere
+        # in the serialized JSON.
+        assert self._MERCHANT_AUTH not in event.ap2_mandate_raw_json
+        assert self._CHECKOUT_MANDATE not in event.ap2_mandate_raw_json
+
+    async def test_raw_opt_in_preserves_non_credential_ap2_keys(self, mock_writer):
+        """A future AP2 namespace might grow non-credential fields
+        (metadata about the mandate, expiry hints, etc.). With raw
+        opt-in those land verbatim — only the credential field names
+        are forced into the redaction set."""
+        tracker = UCPAnalyticsTracker(
+            project_id="test",
+            include_ap2_raw=True,
+        )
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            response_body={
+                "id": "chk_123",
+                "ap2": {
+                    "merchant_authorization": self._MERCHANT_AUTH,
+                    "future_metadata": {"version": 2},
+                },
+            },
+        )
+        raw = json.loads(event.ap2_mandate_raw_json)
+        assert raw["merchant_authorization"] == "[REDACTED]"
+        # Non-credential AP2 field passes through unredacted.
+        assert raw["future_metadata"] == {"version": 2}
+
+    async def test_credentials_redacted_even_with_custom_pii_fields(self, mock_writer):
+        """Operators who pass their own `pii_fields` list (typically
+        to add custom PII keys) must NOT accidentally lose the
+        AP2 credential redaction. The credential field names are
+        force-included into pii_fields regardless of what the
+        operator provided. Acceptance for the safety guarantee."""
+        tracker = UCPAnalyticsTracker(
+            project_id="test",
+            # Operator provides their own list (no AP2 fields).
+            pii_fields=["custom_pii_key"],
+            include_ap2_raw=True,
+        )
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            response_body={
+                "id": "chk_123",
+                "ap2": {"merchant_authorization": self._MERCHANT_AUTH},
+            },
+        )
+        raw = json.loads(event.ap2_mandate_raw_json)
+        # Still redacted — pii_fields force-include is load-bearing.
+        assert raw["merchant_authorization"] == "[REDACTED]"
+
+    async def test_safe_defaults_populate_without_opt_in(self, tracker, mock_writer):
+        """End-to-end: the safe-default columns populate from the
+        un-redacted body even with the default tracker. Pins the
+        un-redacted-extraction path inside record_http so SHA-256 /
+        JOSE header values are real, not hashes of `[REDACTED]`."""
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            response_body={
+                "id": "chk_123",
+                "ap2": {"merchant_authorization": self._MERCHANT_AUTH},
+            },
+        )
+        assert event.ap2_mandate_present is True
+        keys = json.loads(event.ap2_mandate_keys_json)
+        assert keys == ["merchant_authorization"]
+        metadata = json.loads(event.ap2_mandate_metadata_json)
+        # JOSE header decoded → kid + alg.
+        assert metadata["merchant_authorization"]["kid"] == "merchant-key-1"
+        assert metadata["merchant_authorization"]["alg"] == "ES256"
+        # SHA-256 of the ORIGINAL credential string (not the redacted
+        # `[REDACTED]` sentinel).
+        import hashlib
+
+        expected = hashlib.sha256(self._MERCHANT_AUTH.encode("utf-8")).hexdigest()
+        assert metadata["merchant_authorization"]["sha256"] == expected
+
+    async def test_safe_defaults_unaffected_by_general_pii_redact(self, mock_writer):
+        """The safe-default extraction must remain correct even when
+        the operator enables general PII redaction. The order in
+        record_http is: AP2 safe extraction (un-redacted body) →
+        raw capture (always _redact) → general extract (optionally
+        redacted). Without that order, sha256 would hash `[REDACTED]`."""
+        tracker = UCPAnalyticsTracker(
+            project_id="test",
+            redact_pii=True,
+        )
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            response_body={
+                "id": "chk_123",
+                "ap2": {"merchant_authorization": self._MERCHANT_AUTH},
+            },
+        )
+        # Safe-default metadata still has the JOSE-decoded kid /
+        # alg, and the SHA-256 is of the real credential.
+        metadata = json.loads(event.ap2_mandate_metadata_json)
+        assert metadata["merchant_authorization"]["kid"] == "merchant-key-1"
+        import hashlib
+
+        expected = hashlib.sha256(self._MERCHANT_AUTH.encode("utf-8")).hexdigest()
+        assert metadata["merchant_authorization"]["sha256"] == expected
+
+    async def test_buyer_consent_extracted_without_pii_leak(self, tracker, mock_writer):
+        """End-to-end buyer-consent extraction with full PII on the
+        parent buyer object. The column captures only the consent
+        subobject; buyer PII never appears in any extracted column."""
+        event = await tracker.record_http(
+            method="PUT",
+            path="/checkout-sessions/chk_123",
+            status_code=200,
+            response_body={
+                "id": "chk_123",
+                "buyer": {
+                    "first_name": "Jane",
+                    "last_name": "Doe",
+                    "email": "jane@example.com",
+                    "phone_number": "+15551234567",
+                    "consent": {
+                        "analytics": True,
+                        "marketing": False,
+                    },
+                },
+            },
+        )
+        consent = json.loads(event.buyer_consent_json)
+        assert consent == {"analytics": True, "marketing": False}
+        # Serialize the whole BQ row and verify no buyer PII anywhere.
+        row_json = json.dumps(event.to_bq_row())
+        assert "Jane" not in row_json
+        assert "Doe" not in row_json
+        assert "jane@example.com" not in row_json
+        assert "+15551234567" not in row_json
+
+
 class TestPIIRedaction:
     async def test_redacts_configured_fields(self, mock_writer):
         tracker = UCPAnalyticsTracker(

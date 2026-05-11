@@ -2634,6 +2634,329 @@ class TestEmbeddedServicesExtraction:
         assert delegations == ["navigate"]
 
 
+class TestAp2MandateExtraction:
+    """A4 — AP2 mandate fields carry cryptographic credentials
+    (detached JWS / SD-JWT+kb). Safe-default extraction captures only
+    non-PII facts: presence flag, key names, JOSE header fields
+    (kid/alg/typ), and SHA-256 of the credential string. The payload
+    (credential body) is NEVER decoded or persisted."""
+
+    # A real JOSE header: {"alg":"ES256","kid":"merchant-key-1"}
+    # base64url-encoded without padding.
+    _MERCHANT_AUTH_HEADER = "eyJhbGciOiJFUzI1NiIsImtpZCI6Im1lcmNoYW50LWtleS0xIn0"
+    _MERCHANT_AUTH = f"{_MERCHANT_AUTH_HEADER}..MEUCIQDsignaturedata"
+    # SD-JWT+kb: {"alg":"ES256","kid":"buyer-key","typ":"vc+sd-jwt"}
+    _CHECKOUT_MANDATE_HEADER = (
+        "eyJhbGciOiJFUzI1NiIsImtpZCI6ImJ1eWVyLWtleSIsInR5cCI6InZjK3NkLWp3dCJ9"
+    )
+    # Body / disclosures / kb-jwt structure (we should NEVER decode any
+    # of this beyond the first segment).
+    _CHECKOUT_MANDATE = (
+        f"{_CHECKOUT_MANDATE_HEADER}"
+        ".eyJpZCI6Ik5PVF9ERUNPREVEX1BBWUxPQUQifQ"  # payload (mock)
+        ".MEUCIQDsignaturedata"
+        "~WyJzYWx0IiwiZmlyc3RfbmFtZSIsIkpvaG4iXQ"  # disclosure (mock)
+        "~WyJzYWx0MiIsImxhc3RfbmFtZSIsIkRvZSJd"
+    )
+
+    def _extract(self, body):
+        """Mimic what the tracker does: call the private helper on
+        body.ap2 directly. Parser's public `extract()` deliberately
+        skips AP2 to avoid running on a redacted body (per A4's
+        decode-from-original-body requirement)."""
+        result = {}
+        UCPResponseParser._extract_ap2_mandate(body.get("ap2"), result)
+        return result
+
+    def test_merchant_authorization_only(self):
+        body = {"ap2": {"merchant_authorization": self._MERCHANT_AUTH}}
+        fields = self._extract(body)
+        assert fields["ap2_mandate_present"] is True
+        keys = json.loads(fields["ap2_mandate_keys_json"])
+        assert keys == ["merchant_authorization"]
+        metadata = json.loads(fields["ap2_mandate_metadata_json"])
+        assert "merchant_authorization" in metadata
+        ma_meta = metadata["merchant_authorization"]
+        # JOSE header decoded — kid + alg, no payload values.
+        assert ma_meta["alg"] == "ES256"
+        assert ma_meta["kid"] == "merchant-key-1"
+        # `typ` absent in this header — only present when sender ships it.
+        assert "typ" not in ma_meta
+        # SHA-256 of the raw credential string (opaque).
+        import hashlib
+
+        expected = hashlib.sha256(self._MERCHANT_AUTH.encode("utf-8")).hexdigest()
+        assert ma_meta["sha256"] == expected
+        # `checkout_mandate` not present.
+        assert "checkout_mandate" not in metadata
+
+    def test_both_mandates_present(self):
+        body = {
+            "ap2": {
+                "merchant_authorization": self._MERCHANT_AUTH,
+                "checkout_mandate": self._CHECKOUT_MANDATE,
+            }
+        }
+        fields = self._extract(body)
+        assert fields["ap2_mandate_present"] is True
+        keys = json.loads(fields["ap2_mandate_keys_json"])
+        # Order-preserving: matches _AP2_MANDATE_FIELDS order.
+        assert keys == ["merchant_authorization", "checkout_mandate"]
+        metadata = json.loads(fields["ap2_mandate_metadata_json"])
+        assert metadata["merchant_authorization"]["alg"] == "ES256"
+        assert metadata["checkout_mandate"]["alg"] == "ES256"
+        assert metadata["checkout_mandate"]["kid"] == "buyer-key"
+        # The SD-JWT typ is preserved (helps disambiguate credential
+        # types in dashboards).
+        assert metadata["checkout_mandate"]["typ"] == "vc+sd-jwt"
+
+    def test_no_ap2_field_columns_absent(self):
+        body = {"id": "chk_123", "status": "ready_for_complete"}
+        fields = self._extract(body)
+        assert "ap2_mandate_present" not in fields
+        assert "ap2_mandate_keys_json" not in fields
+        assert "ap2_mandate_metadata_json" not in fields
+
+    def test_empty_ap2_dict_columns_absent(self):
+        # body.ap2 exists but has no mandate fields.
+        body = {"ap2": {}}
+        fields = self._extract(body)
+        assert "ap2_mandate_present" not in fields
+        assert "ap2_mandate_keys_json" not in fields
+
+    def test_metadata_extraction_does_not_decode_payload(self):
+        """Critical safety: only the FIRST segment (JOSE header) is
+        decoded. The payload / disclosures / kb-jwt are never decoded.
+        Pin that no field from the mock payload string
+        `NOT_DECODED_PAYLOAD` appears anywhere in the extracted
+        fields — proves we never base64-decoded the second segment."""
+        body = {
+            "ap2": {
+                "checkout_mandate": self._CHECKOUT_MANDATE,
+            }
+        }
+        fields = self._extract(body)
+        # Serialize all extracted fields to one string and assert
+        # the canary value from the payload never appears anywhere.
+        serialized = json.dumps(fields)
+        assert "NOT_DECODED_PAYLOAD" not in serialized
+        assert "first_name" not in serialized
+        assert "last_name" not in serialized
+        # And John / Doe (from the mock disclosures).
+        assert "John" not in serialized
+        assert "Doe" not in serialized
+
+    def test_malformed_credential_string_no_dot_skipped(self):
+        """A bad sender might ship a non-JWS string for the credential.
+        We skip the metadata decode (no header to decode) but the
+        presence/keys/sha256 still populate — analytics records what
+        was shipped, doesn't crash."""
+        body = {"ap2": {"merchant_authorization": "not-a-jws"}}
+        fields = self._extract(body)
+        assert fields["ap2_mandate_present"] is True
+        assert json.loads(fields["ap2_mandate_keys_json"]) == ["merchant_authorization"]
+        metadata = json.loads(fields["ap2_mandate_metadata_json"])
+        # No JOSE header → no kid/alg/typ, but sha256 still present.
+        import hashlib
+
+        expected = hashlib.sha256(b"not-a-jws").hexdigest()
+        assert metadata["merchant_authorization"] == {"sha256": expected}
+
+    def test_malformed_credential_base64_failure_skipped(self):
+        """Credential has a `.` but the first segment isn't valid
+        base64url. JOSE decode silently fails; sha256 still works."""
+        body = {"ap2": {"merchant_authorization": "!!!.payload.signature"}}
+        fields = self._extract(body)
+        metadata = json.loads(fields["ap2_mandate_metadata_json"])
+        # No header fields (base64 failure), but the credential is
+        # still hashed.
+        assert "sha256" in metadata["merchant_authorization"]
+        assert "alg" not in metadata["merchant_authorization"]
+        assert "kid" not in metadata["merchant_authorization"]
+
+    def test_non_dict_ap2_skipped(self):
+        body = {"ap2": "not-a-dict"}
+        fields = self._extract(body)
+        assert "ap2_mandate_present" not in fields
+
+    def test_non_string_credential_value_skipped(self):
+        body = {"ap2": {"merchant_authorization": 42}}
+        fields = self._extract(body)
+        # Field IS in the dict (so it's present), but metadata is
+        # empty (no decode possible, no sha possible).
+        assert fields["ap2_mandate_present"] is True
+        assert "ap2_mandate_metadata_json" not in fields
+
+    def test_unrecognized_ap2_field_ignored(self):
+        """Only `merchant_authorization` and `checkout_mandate` are
+        recognized. A future / custom field on the AP2 namespace
+        doesn't trip the presence flag — the keys list explicitly
+        names which mandates the sender shipped."""
+        body = {
+            "ap2": {
+                "custom_field": "some-value",
+            }
+        }
+        fields = self._extract(body)
+        # No recognized mandate → no columns populate.
+        assert "ap2_mandate_present" not in fields
+
+
+class TestBuyerConsentExtraction:
+    """A4 — buyer.consent is the privacy-preference subobject. We
+    capture ONLY it, never the parent buyer object which carries
+    PII (first_name, last_name, email, phone_number)."""
+
+    def _extract(self, body):
+        result = {}
+        UCPResponseParser._extract_buyer_consent(body.get("buyer"), result)
+        return result
+
+    def test_consent_extracted(self):
+        body = {
+            "buyer": {
+                "first_name": "John",
+                "last_name": "Doe",
+                "email": "john@example.com",
+                "phone_number": "+15551234567",
+                "consent": {
+                    "analytics": True,
+                    "preferences": True,
+                    "marketing": False,
+                    "sale_of_data": False,
+                },
+            }
+        }
+        fields = self._extract(body)
+        # Consent subobject captured.
+        consent = json.loads(fields["buyer_consent_json"])
+        assert consent == {
+            "analytics": True,
+            "preferences": True,
+            "marketing": False,
+            "sale_of_data": False,
+        }
+        # Critical: NO buyer PII anywhere in the extracted fields.
+        serialized = json.dumps(fields)
+        assert "John" not in serialized
+        assert "Doe" not in serialized
+        assert "john@example.com" not in serialized
+        assert "+15551234567" not in serialized
+        # And the parent buyer object is NOT surfaced as its own column.
+        assert "buyer_json" not in fields
+
+    def test_no_consent_subobject_column_absent(self):
+        body = {
+            "buyer": {
+                "first_name": "John",
+                "email": "john@example.com",
+            }
+        }
+        fields = self._extract(body)
+        # buyer present but no consent → column NULL.
+        assert "buyer_consent_json" not in fields
+        # And no PII leaks regardless.
+        serialized = json.dumps(fields)
+        assert "John" not in serialized
+        assert "john@example.com" not in serialized
+
+    def test_no_buyer_at_all_column_absent(self):
+        body = {"id": "chk_xyz"}
+        fields = self._extract(body)
+        assert "buyer_consent_json" not in fields
+
+    def test_empty_consent_omits_column(self):
+        body = {"buyer": {"consent": {}}}
+        fields = self._extract(body)
+        # Explicit empty consent — column stays NULL (no signal to
+        # record). Distinct from "consent not provided".
+        assert "buyer_consent_json" not in fields
+
+    def test_non_dict_consent_skipped(self):
+        body = {"buyer": {"consent": "not-a-dict"}}
+        fields = self._extract(body)
+        assert "buyer_consent_json" not in fields
+
+    def test_non_dict_buyer_skipped(self):
+        body = {"buyer": "not-a-dict"}
+        fields = self._extract(body)
+        assert "buyer_consent_json" not in fields
+
+    def test_unknown_keys_inside_consent_dropped(self):
+        """Reviewer's PR-23 repro: a malformed or extended sender
+        might nest PII fields (`email`, `phone_number`, etc.) inside
+        the consent subobject. Without a whitelist, those would land
+        in the safe-by-default JSON column before _redact() runs.
+
+        Only the four documented consent flags survive the filter
+        (analytics / preferences / marketing / sale_of_data);
+        everything else is silently dropped."""
+        body = {
+            "buyer": {
+                "consent": {
+                    "analytics": True,
+                    "preferences": False,
+                    "email": "nested@example.com",
+                    "phone_number": "+15551234567",
+                    "first_name": "Smuggled",
+                    "metadata": {"tracking_id": "leaked"},
+                    "ip_addresses": ["10.0.0.1"],
+                }
+            }
+        }
+        fields = self._extract(body)
+        consent = json.loads(fields["buyer_consent_json"])
+        # Only whitelisted flags survive.
+        assert consent == {"analytics": True, "preferences": False}
+        # And no PII leaks through the serialization.
+        serialized = json.dumps(fields)
+        assert "nested@example.com" not in serialized
+        assert "+15551234567" not in serialized
+        assert "Smuggled" not in serialized
+        assert "leaked" not in serialized
+        assert "10.0.0.1" not in serialized
+
+    def test_non_boolean_consent_values_dropped(self):
+        """Consent flags are spec'd as booleans. A sender that ships
+        a string / number / dict for one of the whitelisted keys
+        gets that entry dropped — analytics records only well-formed
+        boolean flags. Otherwise a malformed sender could smuggle
+        strings via a documented key name."""
+        body = {
+            "buyer": {
+                "consent": {
+                    "analytics": "yes",  # string, not bool
+                    "preferences": 1,  # int, not bool
+                    "marketing": False,  # valid bool — should survive
+                    "sale_of_data": {"value": True},  # dict, not bool
+                }
+            }
+        }
+        fields = self._extract(body)
+        consent = json.loads(fields["buyer_consent_json"])
+        # Only the well-formed boolean survives.
+        assert consent == {"marketing": False}
+
+    def test_all_keys_unknown_omits_column(self):
+        """If every key in consent fails the whitelist (rare, but
+        possible if a sender renames everything or only ships PII),
+        the column stays NULL rather than serializing an empty dict.
+        Three-state signal: NULL = "no recognized consent data",
+        distinct from `{}` = "explicitly empty"."""
+        body = {
+            "buyer": {
+                "consent": {
+                    "email": "nested@example.com",
+                    "custom_flag": True,  # bool but unknown key
+                }
+            }
+        }
+        fields = self._extract(body)
+        assert "buyer_consent_json" not in fields
+        # PII didn't leak.
+        assert "nested@example.com" not in json.dumps(fields)
+
+
 class TestCheckoutStatusScoping:
     """Tests that checkout_status is only set for checkout responses."""
 

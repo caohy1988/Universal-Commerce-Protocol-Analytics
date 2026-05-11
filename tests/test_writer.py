@@ -167,6 +167,16 @@ class TestGetDDL:
         assert "eligibility_not_accepted_present BOOL" in ddl
         assert "eligibility_invalid_present BOOL" in ddl
 
+    def test_ap2_mandate_columns_present(self):
+        """A4 — pin all five AP2 columns. Missing one would silently
+        drop the corresponding KPI on table creation."""
+        ddl = get_ddl("p", "d", "t")
+        assert "ap2_mandate_present BOOL" in ddl
+        assert "ap2_mandate_keys_json JSON" in ddl
+        assert "ap2_mandate_metadata_json JSON" in ddl
+        assert "buyer_consent_json JSON" in ddl
+        assert "ap2_mandate_raw_json JSON" in ddl
+
     def test_embedded_checkout_columns_present(self):
         """A3 — pin all three embedded-checkout columns. Missing one
         would silently drop the corresponding KPI."""

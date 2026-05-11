@@ -135,6 +135,37 @@ class UCPEvent:
     embedded_color_schemes_json: Optional[str] = None
     embedded_ec_color_scheme: Optional[str] = None
 
+    # --- A4: AP2 mandates + Buyer Consent ---
+    # AP2 (Agent Payments Protocol) extends Checkout with cryptographic
+    # mandates: `merchant_authorization` is a detached JWS (RFC 7515
+    # App F) and `checkout_mandate` is an SD-JWT+KB credential. Both
+    # carry signed claims about the buyer / merchant; capturing them
+    # verbatim would land sensitive credentials in analytics.
+    #
+    # Safe-by-default columns observe only non-PII facts:
+    #   * `ap2_mandate_present` -- whether ANY mandate field is present
+    #   * `ap2_mandate_keys_json` -- which mandate fields are present
+    #     (`["merchant_authorization", "checkout_mandate"]`)
+    #   * `ap2_mandate_metadata_json` -- JOSE-header facts only
+    #     (`kid`, `alg`, `typ`) plus SHA-256 hex of the credential
+    #     string. NEVER the payload (the credential body), NEVER the
+    #     disclosures.
+    #   * `buyer_consent_json` -- ONLY `body.buyer.consent` (the
+    #     shape-only consent flags), NEVER the full buyer object
+    #     which carries PII (first_name, last_name, email,
+    #     phone_number).
+    #
+    # Opt-in raw column (only when tracker `include_ap2_raw=True`):
+    #   * `ap2_mandate_raw_json` -- original `body.ap2` object passed
+    #     through `_redact`, which has `merchant_authorization` and
+    #     `checkout_mandate` in the default pii_fields so credentials
+    #     are redacted even with the opt-in. Disabled by default.
+    ap2_mandate_present: Optional[bool] = None
+    ap2_mandate_keys_json: Optional[str] = None
+    ap2_mandate_metadata_json: Optional[str] = None
+    buyer_consent_json: Optional[str] = None
+    ap2_mandate_raw_json: Optional[str] = None
+
     # --- HTTP ---
     http_method: str = ""
     http_path: str = ""

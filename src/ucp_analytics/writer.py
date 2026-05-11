@@ -38,6 +38,16 @@ BQ_SCHEMA_FIELDS = [
     ("embedded_delegations_json", "JSON", "NULLABLE"),
     ("embedded_color_schemes_json", "JSON", "NULLABLE"),
     ("embedded_ec_color_scheme", "STRING", "NULLABLE"),
+    # A4: AP2 mandates + Buyer Consent. Safe-by-default columns
+    # observe only non-PII facts (mandate presence, key names, JOSE
+    # header metadata, consent flags); the opt-in raw column carries
+    # the AP2 object after passing through `_redact` so credential
+    # strings are scrubbed before landing.
+    ("ap2_mandate_present", "BOOL", "NULLABLE"),
+    ("ap2_mandate_keys_json", "JSON", "NULLABLE"),
+    ("ap2_mandate_metadata_json", "JSON", "NULLABLE"),
+    ("buyer_consent_json", "JSON", "NULLABLE"),
+    ("ap2_mandate_raw_json", "JSON", "NULLABLE"),
     # HTTP
     ("http_method", "STRING", "NULLABLE"),
     ("http_path", "STRING", "NULLABLE"),
