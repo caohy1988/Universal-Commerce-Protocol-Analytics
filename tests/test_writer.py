@@ -167,6 +167,14 @@ class TestGetDDL:
         assert "eligibility_not_accepted_present BOOL" in ddl
         assert "eligibility_invalid_present BOOL" in ddl
 
+    def test_embedded_checkout_columns_present(self):
+        """A3 — pin all three embedded-checkout columns. Missing one
+        would silently drop the corresponding KPI."""
+        ddl = get_ddl("p", "d", "t")
+        assert "embedded_delegations_json JSON" in ddl
+        assert "embedded_color_schemes_json JSON" in ddl
+        assert "embedded_ec_color_scheme STRING" in ddl
+
     def test_signature_alg_columns_present(self):
         """C5c — pin both per-direction algorithm columns. Missing
         one would silently drop the corresponding column from

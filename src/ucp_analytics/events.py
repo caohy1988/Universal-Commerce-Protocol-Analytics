@@ -117,6 +117,24 @@ class UCPEvent:
     platform_profile_url: str = ""
     transport: str = "rest"  # rest | mcp | a2a | embedded
 
+    # --- A3: Embedded Checkout (server-observable slice) ---
+    # The transport enum has listed `embedded` for a while but we
+    # captured nothing embedded-specific. Two server-observable
+    # signals from this library: (a) discovery responses where a
+    # `transport: embedded` service entry carries an
+    # EmbeddedTransportConfig with `delegate` and `color_scheme`
+    # lists; (b) the `ec_color_scheme` URL query parameter the host
+    # sends when fetching the embedded checkout page.
+    #
+    # Runtime postMessage events (link delegation acceptance,
+    # `ec.totals.change`, error alignment, reauth, cart binding)
+    # are NOT capturable from server-side HTTP — they live in the
+    # iframe / host browser and need separate host instrumentation
+    # to land in analytics. Out of scope for this slice.
+    embedded_delegations_json: Optional[str] = None
+    embedded_color_schemes_json: Optional[str] = None
+    embedded_ec_color_scheme: Optional[str] = None
+
     # --- HTTP ---
     http_method: str = ""
     http_path: str = ""

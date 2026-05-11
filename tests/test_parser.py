@@ -2420,6 +2420,220 @@ class TestOrderLifecycleExtraction:
         assert "latest_adjustment_at" not in fields
 
 
+class TestEmbeddedServicesExtraction:
+    """A3 — extract `delegate` and `color_scheme` from embedded
+    transport service entries in a `/.well-known/ucp` discovery
+    response. Runtime postMessage events (ec.totals.change, reauth,
+    etc.) are out of scope; this is the observable-from-server slice
+    of the Embedded Checkout protocol surface."""
+
+    def test_single_embedded_service_populates_both_columns(self):
+        body = {
+            "ucp": {
+                "version": "2026-05-09",
+                "services": {
+                    "dev.ucp.shopping.checkout": [
+                        {
+                            "transport": "embedded",
+                            "schema": "https://merchant.example/schema.json",
+                            "config": {
+                                "delegate": ["navigate", "submit_form"],
+                                "color_scheme": ["light", "dark"],
+                            },
+                        }
+                    ]
+                },
+            }
+        }
+        fields = UCPResponseParser.extract(body)
+        delegations = json.loads(fields["embedded_delegations_json"])
+        assert delegations == ["navigate", "submit_form"]
+        schemes = json.loads(fields["embedded_color_schemes_json"])
+        assert schemes == ["light", "dark"]
+
+    def test_multiple_embedded_services_union_deduped(self):
+        """A platform may offer embedded bindings on multiple
+        capabilities (checkout, cart). Each can advertise its own
+        `delegate` / `color_scheme` lists; we union across them so
+        dashboards see "what does this platform support" without
+        joining on capability key. Dedup preserves order of first
+        occurrence."""
+        body = {
+            "ucp": {
+                "version": "2026-05-09",
+                "services": {
+                    "dev.ucp.shopping.checkout": [
+                        {
+                            "transport": "embedded",
+                            "config": {
+                                "delegate": ["navigate", "submit_form"],
+                                "color_scheme": ["light", "dark"],
+                            },
+                        }
+                    ],
+                    "dev.ucp.shopping.cart": [
+                        {
+                            "transport": "embedded",
+                            "config": {
+                                # Overlapping `navigate` should dedupe; new
+                                # `submit_payment` appends in order.
+                                "delegate": ["navigate", "submit_payment"],
+                                # Only light — doesn't add anything new.
+                                "color_scheme": ["light"],
+                            },
+                        }
+                    ],
+                },
+            }
+        }
+        fields = UCPResponseParser.extract(body)
+        delegations = json.loads(fields["embedded_delegations_json"])
+        assert delegations == ["navigate", "submit_form", "submit_payment"]
+        schemes = json.loads(fields["embedded_color_schemes_json"])
+        assert schemes == ["light", "dark"]
+
+    def test_non_embedded_transports_ignored(self):
+        """Only `transport: embedded` entries contribute. REST / MCP
+        / A2A services advertise `endpoint` / `schema` but no embedded
+        config, and any spurious `delegate` / `color_scheme` keys on
+        them must not leak into the embedded columns."""
+        body = {
+            "ucp": {
+                "version": "2026-05-09",
+                "services": {
+                    "dev.ucp.shopping.checkout": [
+                        {
+                            "transport": "rest",
+                            "endpoint": "https://merchant.example/api",
+                            # Spurious — must NOT be captured.
+                            "config": {
+                                "delegate": ["should-not-appear"],
+                                "color_scheme": ["should-not-appear"],
+                            },
+                        },
+                        {
+                            "transport": "mcp",
+                            "endpoint": "https://merchant.example/mcp",
+                        },
+                    ]
+                },
+            }
+        }
+        fields = UCPResponseParser.extract(body)
+        assert "embedded_delegations_json" not in fields
+        assert "embedded_color_schemes_json" not in fields
+
+    def test_embedded_service_with_no_config_omits_columns(self):
+        """An embedded service entry without a `config` block
+        contributes nothing — both columns stay NULL rather than
+        appearing as empty JSON arrays. Preserves the three-state
+        signal (NULL = "no data" distinct from `[]` = "explicitly
+        empty")."""
+        body = {
+            "ucp": {
+                "version": "2026-05-09",
+                "services": {
+                    "dev.ucp.shopping.checkout": [
+                        {
+                            "transport": "embedded",
+                            "schema": "https://merchant.example/schema.json",
+                        }
+                    ]
+                },
+            }
+        }
+        fields = UCPResponseParser.extract(body)
+        assert "embedded_delegations_json" not in fields
+        assert "embedded_color_schemes_json" not in fields
+
+    def test_malformed_config_shapes_skipped_silently(self):
+        """A single bad entry mustn't drop the column for the row.
+        Non-dict configs, non-list `delegate` / `color_scheme`, and
+        non-string list entries are all filtered out; well-formed
+        siblings still surface."""
+        body = {
+            "ucp": {
+                "version": "2026-05-09",
+                "services": {
+                    "dev.ucp.shopping.checkout": [
+                        {
+                            "transport": "embedded",
+                            "config": "not-a-dict",
+                        },
+                        {
+                            "transport": "embedded",
+                            "config": {
+                                "delegate": "not-a-list",
+                                "color_scheme": ["light"],
+                            },
+                        },
+                        {
+                            "transport": "embedded",
+                            "config": {
+                                "delegate": ["navigate", 42, None, "submit_form"],
+                                "color_scheme": [None, "dark", 42],
+                            },
+                        },
+                    ]
+                },
+            }
+        }
+        fields = UCPResponseParser.extract(body)
+        delegations = json.loads(fields["embedded_delegations_json"])
+        # Non-string entries silently dropped; well-formed entries kept.
+        assert delegations == ["navigate", "submit_form"]
+        schemes = json.loads(fields["embedded_color_schemes_json"])
+        assert schemes == ["light", "dark"]
+
+    def test_empty_config_arrays_omit_columns(self):
+        """`config: {delegate: [], color_scheme: []}` — explicit
+        empty lists. We don't ship empty JSON arrays; columns stay
+        NULL for a clean three-state signal."""
+        body = {
+            "ucp": {
+                "version": "2026-05-09",
+                "services": {
+                    "dev.ucp.shopping.checkout": [
+                        {
+                            "transport": "embedded",
+                            "config": {"delegate": [], "color_scheme": []},
+                        }
+                    ]
+                },
+            }
+        }
+        fields = UCPResponseParser.extract(body)
+        assert "embedded_delegations_json" not in fields
+        assert "embedded_color_schemes_json" not in fields
+
+    def test_no_services_in_ucp_envelope_omits_columns(self):
+        body = {"ucp": {"version": "2026-05-09"}}
+        fields = UCPResponseParser.extract(body)
+        assert "embedded_delegations_json" not in fields
+        assert "embedded_color_schemes_json" not in fields
+
+    def test_non_dict_services_value_skipped(self):
+        """A capability key pointing at a non-list (malformed sender)
+        must not crash the walk."""
+        body = {
+            "ucp": {
+                "version": "2026-05-09",
+                "services": {
+                    "dev.ucp.shopping.checkout": "not-a-list",
+                    "dev.ucp.shopping.cart": [
+                        {
+                            "transport": "embedded",
+                            "config": {"delegate": ["navigate"]},
+                        }
+                    ],
+                },
+            }
+        }
+        fields = UCPResponseParser.extract(body)
+        delegations = json.loads(fields["embedded_delegations_json"])
+        assert delegations == ["navigate"]
+
+
 class TestCheckoutStatusScoping:
     """Tests that checkout_status is only set for checkout responses."""
 
