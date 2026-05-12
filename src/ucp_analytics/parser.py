@@ -375,11 +375,19 @@ class UCPResponseParser:
             # Lifecycle derivation: prefer the new-shape
             # `fulfillment.events[]` / `adjustments[]` arrays (c5c6139)
             # and fall back to legacy top-level `status`. The helper
-            # encapsulates all three branches.
+            # encapsulates all three branches. Lifecycle wins on
+            # both GET and PUT — a GET that returns a delivered
+            # order still classifies as ORDER_DELIVERED.
             if response_body and isinstance(response_body, dict):
                 lifecycle = _lifecycle_event_from_order_body(response_body)
                 if lifecycle:
                     return lifecycle
+            # B5: GET /orders/{id} is a read-only poll, distinct from
+            # ORDER_UPDATED (which is REST-driven PUT mutation).
+            # Without this branch, plain reads inflate the
+            # "% of order rows that mutated the order" KPI.
+            if m == "GET":
+                return UCPEventType.ORDER_GET
             return UCPEventType.ORDER_UPDATED
 
         # Identity linking (strict: /identity, /oauth, or /oauth2 paths).
@@ -515,6 +523,13 @@ class UCPResponseParser:
             if "checkout_id" in body:
                 result["order_id"] = id_str
                 result["checkout_session_id"] = body["checkout_id"]
+                # C7: optional `label` per `order.json` (PR #326). Only
+                # surface it when the body is order-shaped (carries
+                # checkout_id) so a stray `label` on a checkout body
+                # doesn't get misattributed. Business-set only per spec.
+                label = body.get("label")
+                if isinstance(label, str) and label:
+                    result["order_label"] = label
             else:
                 result["checkout_session_id"] = id_str
 
@@ -736,36 +751,65 @@ class UCPResponseParser:
     # Helpers
     # ------------------------------------------------------------------ #
 
+    # B1 / C9 mapping. `total.json` is an open vocabulary with these
+    # well-known type values; businesses MAY use additional types
+    # (captured verbatim via `totals_json`). Each scalar column is
+    # SUM(amount) over all entries of the matching type — `total.json`
+    # permits multiple detail rows per type plus `lines[]`
+    # itemization, so last-wins assignment would silently drop
+    # split-tax / multi-line-discount data.
+    _TOTALS_TYPE_TO_COLUMN = {
+        "items_discount": "items_discount_amount",
+        "subtotal": "subtotal_amount",
+        "discount": "discount_amount",
+        "fulfillment": "fulfillment_amount",
+        "tax": "tax_amount",
+        "fee": "fee_amount",
+        "total": "total_amount",
+    }
+
     @classmethod
     def _extract_totals(cls, totals: Any, result: Dict[str, Any]) -> None:
         """Parse the UCP totals array into individual amount fields.
 
-        Spec total types: items_discount, subtotal, discount, fulfillment,
-        tax, fee, total.
+        Spec total types (well-known, open vocabulary): items_discount,
+        subtotal, discount, fulfillment, tax, fee, total. Businesses
+        MAY use additional values per `total.json`; the verbatim array
+        rides on `totals_json` for downstream analysis.
+
+        Amounts integer-only and signed per `signed_amount.json`
+        (positive for charges, negative for refunds). Multiple
+        detail rows of the same type SUM into the scalar column —
+        e.g. split state+local tax rows accumulate into
+        `tax_amount`. Without SUM, a sender that ships two tax
+        entries would last-wins-drop one of them.
         """
         if not isinstance(totals, list):
             return
+        # Preserve full ordered array (every entry, including
+        # duplicates / `display_text` / `lines[]` / business-defined
+        # types) for dashboards that need per-line trails or refund
+        # breakdowns. Filter to dict entries so JSON_QUERY downstream
+        # doesn't choke.
+        clean = [item for item in totals if isinstance(item, dict)]
+        if clean:
+            result["totals_json"] = json.dumps(clean, default=str)
+        # Per-type SUM aggregation into scalar columns.
         for item in totals:
             if not isinstance(item, dict):
                 continue
             t_type = item.get("type", "")
             amount = item.get("amount")
-            if amount is None:
+            if not isinstance(amount, int) or isinstance(amount, bool):
+                # Reject non-int amounts (incl. bool, which is an
+                # int subclass — `True + 100` would silently
+                # corrupt). String/float amounts are out-of-spec
+                # and dropped; well-formed siblings still survive.
                 continue
-            if t_type == "items_discount":
-                result["items_discount_amount"] = amount
-            elif t_type == "subtotal":
-                result["subtotal_amount"] = amount
-            elif t_type == "discount":
-                result["discount_amount"] = amount
-            elif t_type == "fulfillment":
-                result["fulfillment_amount"] = amount
-            elif t_type == "tax":
-                result["tax_amount"] = amount
-            elif t_type == "fee":
-                result["fee_amount"] = amount
-            elif t_type == "total":
-                result["total_amount"] = amount
+            column = cls._TOTALS_TYPE_TO_COLUMN.get(t_type)
+            if column is None:
+                continue
+            result[column] = result.get(column, 0) + amount
 
     @classmethod
     def _extract_context_fields(cls, context: Any, result: Dict[str, Any]) -> None:

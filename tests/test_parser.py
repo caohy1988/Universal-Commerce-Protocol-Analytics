@@ -1199,6 +1199,207 @@ class TestExtract:
         fields = UCPResponseParser.extract(body)
         assert fields["continue_url"] == ("https://shop.example.com/checkout/escalate")
 
+    # --- B1 / C9: totals SUM aggregation + totals_json ---
+
+    def test_totals_duplicate_types_sum_instead_of_last_wins(self):
+        """`total.json` permits multiple detail rows of the same
+        well-known type (split state+local tax, multi-line discount,
+        etc.). Scalar amount columns must SUM, not last-wins.
+        Reviewer's PR-audit repro: tax 100 + 25 -> tax_amount 125."""
+        body = {
+            "totals": [
+                {"type": "tax", "amount": 100, "display_text": "state tax"},
+                {"type": "tax", "amount": 25, "display_text": "local tax"},
+                {"type": "discount", "amount": -200},
+                {"type": "discount", "amount": -50},
+            ]
+        }
+        fields = UCPResponseParser.extract(body)
+        assert fields["tax_amount"] == 125
+        assert fields["discount_amount"] == -250
+
+    def test_totals_signed_amounts_round_trip(self):
+        """`signed_amount.json` permits negative integer amounts
+        (refunds, credits). The SUM keeps signedness so a refund
+        row's totals stay negative end-to-end."""
+        body = {
+            "totals": [
+                {"type": "total", "amount": -1999, "display_text": "refund"},
+            ]
+        }
+        fields = UCPResponseParser.extract(body)
+        assert fields["total_amount"] == -1999
+
+    def test_totals_json_preserves_full_ordered_array(self):
+        """The verbatim totals array — including duplicates, custom
+        `display_text`, `lines[]` itemization, and business-defined
+        types — lands in `totals_json`. Scalar columns drop
+        business-defined types (open vocab beyond the seven
+        well-known ones); `totals_json` keeps them so dashboards
+        can pivot on per-business categories."""
+        totals = [
+            {"type": "subtotal", "amount": 5000, "lines": [{"sku": "A"}]},
+            {"type": "tax", "amount": 100, "display_text": "state"},
+            {"type": "tax", "amount": 25, "display_text": "local"},
+            {"type": "dev.merchant.custom_fee", "amount": 50},
+            {"type": "total", "amount": 5175},
+        ]
+        body = {"totals": totals}
+        fields = UCPResponseParser.extract(body)
+        round_tripped = json.loads(fields["totals_json"])
+        assert round_tripped == totals
+        # Scalar SUM still works on well-known types.
+        assert fields["tax_amount"] == 125
+        # Business-defined type doesn't appear as a scalar column
+        # but is preserved in totals_json above.
+        assert "dev.merchant.custom_fee_amount" not in fields
+
+    def test_totals_json_filters_non_dict_entries(self):
+        body = {
+            "totals": [
+                {"type": "tax", "amount": 100},
+                "not-a-dict",
+                None,
+                {"type": "total", "amount": 100},
+            ]
+        }
+        fields = UCPResponseParser.extract(body)
+        round_tripped = json.loads(fields["totals_json"])
+        # Non-dict entries dropped from the JSON column.
+        assert len(round_tripped) == 2
+        # Scalar SUM still works.
+        assert fields["tax_amount"] == 100
+        assert fields["total_amount"] == 100
+
+    def test_totals_non_int_amount_dropped(self):
+        """Amounts must be integers per `signed_amount.json`. A
+        string / float / bool amount is out-of-spec; the entry is
+        dropped from SUM but the totals_json still preserves it
+        verbatim (signal fidelity)."""
+        body = {
+            "totals": [
+                {"type": "tax", "amount": "100"},  # string
+                {"type": "tax", "amount": 99.5},  # float
+                {"type": "tax", "amount": True},  # bool (int subclass)
+                {"type": "tax", "amount": 50},  # well-formed
+            ]
+        }
+        fields = UCPResponseParser.extract(body)
+        # Only the int entry counts toward SUM.
+        assert fields["tax_amount"] == 50
+
+    def test_totals_empty_array_omits_json_column(self):
+        body = {"totals": []}
+        fields = UCPResponseParser.extract(body)
+        assert "totals_json" not in fields
+        assert "tax_amount" not in fields
+
+    def test_totals_no_totals_key_omits_json_column(self):
+        body = {"id": "chk_123"}
+        fields = UCPResponseParser.extract(body)
+        assert "totals_json" not in fields
+
+    # --- C7: order_label ---
+
+    def test_order_label_extracted_on_order_body(self):
+        """`label` per `order.json` (PR #326). Business-set,
+        order-shaped (carries checkout_id) only."""
+        body = {
+            "id": "order_xyz",
+            "checkout_id": "chk_a",
+            "label": "ORD-2026-00042",
+        }
+        fields = UCPResponseParser.extract(body)
+        assert fields["order_label"] == "ORD-2026-00042"
+        # And order_id correctly classified.
+        assert fields["order_id"] == "order_xyz"
+
+    def test_order_label_not_extracted_on_checkout_body(self):
+        """A stray `label` on a checkout body (no checkout_id, since
+        it IS the checkout) must NOT misattribute to order_label."""
+        body = {
+            "id": "chk_123",
+            "status": "ready_for_complete",
+            "label": "should-not-leak-to-order-label",
+        }
+        fields = UCPResponseParser.extract(body)
+        assert "order_label" not in fields
+        assert fields["checkout_session_id"] == "chk_123"
+
+    def test_order_label_absent_when_not_in_body(self):
+        body = {"id": "order_xyz", "checkout_id": "chk_a"}
+        fields = UCPResponseParser.extract(body)
+        assert "order_label" not in fields
+
+    def test_order_label_non_string_dropped(self):
+        body = {
+            "id": "order_xyz",
+            "checkout_id": "chk_a",
+            "label": 42,  # malformed sender
+        }
+        fields = UCPResponseParser.extract(body)
+        assert "order_label" not in fields
+
+    def test_order_label_empty_string_dropped(self):
+        body = {
+            "id": "order_xyz",
+            "checkout_id": "chk_a",
+            "label": "",
+        }
+        fields = UCPResponseParser.extract(body)
+        assert "order_label" not in fields
+
+    # --- B5: ORDER_GET ---
+
+    def test_get_orders_with_no_lifecycle_classifies_as_order_get(self):
+        """GET /orders/{id} returning a no-lifecycle order body
+        classifies as ORDER_GET (read-only poll), distinct from
+        ORDER_UPDATED (REST PUT mutation)."""
+        result = UCPResponseParser.classify(
+            "GET",
+            "/orders/order_xyz",
+            200,
+            response_body={"id": "order_xyz", "checkout_id": "chk_a"},
+        )
+        assert result == UCPEventType.ORDER_GET
+
+    def test_get_orders_with_lifecycle_classifies_by_lifecycle(self):
+        """A GET returning a `delivered` fulfillment event still
+        classifies as ORDER_DELIVERED — lifecycle wins on either
+        GET or PUT."""
+        result = UCPResponseParser.classify(
+            "GET",
+            "/orders/order_xyz",
+            200,
+            response_body={
+                "id": "order_xyz",
+                "checkout_id": "chk_a",
+                "fulfillment": {
+                    "events": [
+                        {
+                            "id": "fe_1",
+                            "occurred_at": "2026-05-09T17:00:00Z",
+                            "type": "delivered",
+                            "line_items": [],
+                        },
+                    ]
+                },
+            },
+        )
+        assert result == UCPEventType.ORDER_DELIVERED
+
+    def test_put_orders_still_classifies_as_order_updated(self):
+        """A REST PUT remains ORDER_UPDATED — only GET changes
+        behavior. ORDER_UPDATED is the mutation path; ORDER_GET is
+        the read-only poll."""
+        result = UCPResponseParser.classify(
+            "PUT",
+            "/orders/order_xyz",
+            200,
+            response_body={"id": "order_xyz", "checkout_id": "chk_a"},
+        )
+        assert result == UCPEventType.ORDER_UPDATED
+
     def test_extract_identity_fields(self):
         """Identity provider and scope from response body."""
         body = {"provider": "google", "scope": "openid email"}

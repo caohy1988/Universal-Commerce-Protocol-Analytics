@@ -43,6 +43,12 @@ class UCPEventType(str, Enum):
     # Order lifecycle (webhook-based in UCP)
     ORDER_CREATED = "order_created"
     ORDER_UPDATED = "order_updated"
+    # B5: REST GET /orders/{id} reads order state without mutating it.
+    # Distinct from ORDER_UPDATED (REST-driven PUT) and ORDER_*
+    # lifecycle types (state transitions). Without this, a plain
+    # poll on the order endpoint was misclassified as an update,
+    # inflating the "% of rows that mutated the order" KPI.
+    ORDER_GET = "order_get"
     ORDER_SHIPPED = "order_shipped"
     ORDER_DELIVERED = "order_delivered"
     ORDER_RETURNED = "order_returned"
@@ -269,6 +275,13 @@ class UCPEvent:
     tax_amount: Optional[int] = None
     fee_amount: Optional[int] = None
     total_amount: Optional[int] = None
+    # B1 / C9: full verbatim totals array. Scalar amount columns
+    # above are SUM(amount) per well-known type; this column
+    # preserves the original ordered entries (with `display_text`,
+    # `lines[]` itemization, duplicates, business-defined types)
+    # so dashboards can compute multi-tax / refund-line / business-
+    # type analytics without losing the per-line trail.
+    totals_json: Optional[str] = None
 
     # --- line items ---
     line_items_json: Optional[str] = None
@@ -309,6 +322,12 @@ class UCPEvent:
 
     # --- order ---
     permalink_url: Optional[str] = None
+    # C7: optional human-readable label per `order.json` (PR #326
+    # upstream). Business-set only — agents / platforms must not
+    # populate. Surfaced only on order-shaped bodies (carry
+    # `checkout_id`) so a stray `label` on a checkout body doesn't
+    # get misattributed.
+    order_label: Optional[str] = None
 
     # --- order lifecycle (B8: fulfillment.events[] + adjustments[]) ---
     # At UCP order.md/c5c6139 the order has no top-level `status`;

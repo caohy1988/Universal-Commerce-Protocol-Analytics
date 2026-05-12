@@ -105,6 +105,12 @@ BQ_SCHEMA_FIELDS = [
     ("tax_amount", "INTEGER", "NULLABLE"),
     ("fee_amount", "INTEGER", "NULLABLE"),
     ("total_amount", "INTEGER", "NULLABLE"),
+    # B1 / C9: full verbatim totals[] array. Scalar columns above
+    # are SUM(amount) per well-known type; this preserves the
+    # original ordering / duplicates / `display_text` / `lines[]`
+    # itemization and any business-defined types per
+    # `total.json`'s open vocabulary.
+    ("totals_json", "JSON", "NULLABLE"),
     # line items
     ("line_items_json", "JSON", "NULLABLE"),
     ("line_item_count", "INTEGER", "NULLABLE"),
@@ -135,6 +141,9 @@ BQ_SCHEMA_FIELDS = [
     ("continue_url", "STRING", "NULLABLE"),
     # order
     ("permalink_url", "STRING", "NULLABLE"),
+    # C7: human-readable order label (business-set, optional per
+    # PR #326 upstream). Surfaced only on order-shaped bodies.
+    ("order_label", "STRING", "NULLABLE"),
     # B8 — order lifecycle from fulfillment.events[] + adjustments[].
     # At c5c6139 order.json has no top-level `status`; lifecycle is
     # observable only through these two append-only arrays. JSON
