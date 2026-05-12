@@ -15,8 +15,32 @@ import re
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
+from ucp_analytics._headers import credential_sha256, decode_jose_header
 from ucp_analytics._path_match import is_webhook_delivery
 from ucp_analytics.events import UCPEventType
+
+# A4: AP2 mandate field names. Both are cryptographic credentials
+# (detached JWS / SD-JWT+kb) and must never appear verbatim in
+# analytics — captured only via SHA-256 hash + JOSE header in the
+# safe-default columns, and only via the redacted raw column if the
+# operator opts in.
+_AP2_MANDATE_FIELDS = ("merchant_authorization", "checkout_mandate")
+# Non-secret JOSE header fields we surface from each mandate. `kid`
+# identifies the signing key, `alg` the algorithm, `typ` the
+# credential type (e.g. `vc+sd-jwt`). Anything else in the header
+# is platform-specific and not part of the analytics contract.
+_AP2_SAFE_HEADER_FIELDS = ("kid", "alg", "typ")
+
+# A4: known buyer.consent flags (the only fields we serialize from
+# the consent subobject). A strict whitelist — a malformed or
+# extended sender that nests PII fields like `email` inside consent
+# would otherwise leak them into the safe-by-default column before
+# any redaction runs. We also restrict values to booleans (the
+# consent spec is shape-only flags). Anything off-shape is silently
+# dropped, preserving signal fidelity for the known flags.
+_BUYER_CONSENT_FIELDS = frozenset(
+    {"analytics", "preferences", "marketing", "sale_of_data"}
+)
 
 # A5 — Eligibility verification outcome codes. Per UCP `eligibility.md`,
 # verification outcomes surface through `messages[].code` rather than a
@@ -539,6 +563,13 @@ class UCPResponseParser:
         # --- A3: embedded transport config from ucp.services[*] ---
         cls._extract_embedded_services(body.get("ucp"), result)
 
+        # NOTE: A4 (AP2 mandate metadata + buyer consent) is NOT
+        # extracted here. Those fields need the un-redacted body to
+        # compute SHA-256 / decode JOSE headers, while this `extract`
+        # method runs AFTER the tracker's general PII redaction.
+        # The tracker calls `_extract_ap2_mandate` and
+        # `_extract_buyer_consent` directly on the original body.
+
         # --- payment_handlers registry from ucp metadata ---
         cls._extract_payment_available_instruments(body.get("ucp"), result)
 
@@ -889,6 +920,111 @@ class UCPResponseParser:
             result["embedded_delegations_json"] = json.dumps(delegations)
         if color_schemes:
             result["embedded_color_schemes_json"] = json.dumps(color_schemes)
+
+    @classmethod
+    def _extract_ap2_mandate(cls, ap2: Any, result: Dict[str, Any]) -> None:
+        """Capture safe-default metadata from ``body.ap2`` mandates.
+
+        AP2 (Agent Payments Protocol) extends Checkout with two
+        cryptographic mandate fields under ``body.ap2``:
+
+          * ``merchant_authorization`` -- a detached JWS (RFC 7515
+            App F) over the checkout body, format ``<header>..<sig>``
+            (note the double-dot: empty payload, since the payload is
+            the body itself).
+          * ``checkout_mandate`` -- an SD-JWT+kb credential, format
+            ``<header>.<payload>.<sig>~<disclosure>~...~<kb-jwt>``.
+
+        Both carry signed claims about the buyer or merchant.
+        Capturing them verbatim would land sensitive credentials in
+        analytics. This extractor observes only:
+
+          * presence (BOOL)
+          * which keys are present (JSON array of mandate field
+            names — already public, just observability of which
+            mandates the platform shipped)
+          * JOSE-header facts (``kid``, ``alg``, ``typ``) -- decoded
+            from the FIRST segment of each credential, which is the
+            base64url-encoded JOSE header. We never decode the
+            payload (second segment) or the disclosures.
+          * SHA-256 hex of the full credential string -- treats the
+            credential as opaque so dashboards can correlate the
+            same credential across rows without persisting it.
+
+        Defensive: malformed shapes (non-dict ``ap2``, non-string
+        credential values, base64url decode failures, non-JSON
+        header bytes) are skipped silently so a single bad sender
+        doesn't drop the row.
+        """
+        if not isinstance(ap2, dict):
+            return
+
+        present_keys: List[str] = [
+            field for field in _AP2_MANDATE_FIELDS if field in ap2
+        ]
+        if not present_keys:
+            return
+
+        result["ap2_mandate_present"] = True
+        result["ap2_mandate_keys_json"] = json.dumps(present_keys)
+
+        metadata: Dict[str, Dict[str, Any]] = {}
+        for field in present_keys:
+            credential = ap2.get(field)
+            entry: Dict[str, Any] = {}
+            header = decode_jose_header(credential)
+            if header:
+                for header_field in _AP2_SAFE_HEADER_FIELDS:
+                    value = header.get(header_field)
+                    if isinstance(value, str) and value:
+                        entry[header_field] = value
+            sha = credential_sha256(credential)
+            if sha:
+                entry["sha256"] = sha
+            if entry:
+                metadata[field] = entry
+        if metadata:
+            result["ap2_mandate_metadata_json"] = json.dumps(metadata)
+
+    @classmethod
+    def _extract_buyer_consent(cls, buyer: Any, result: Dict[str, Any]) -> None:
+        """Capture ONLY ``body.buyer.consent`` -- not the parent buyer.
+
+        Per ``buyer.json``, the buyer object carries PII (first_name,
+        last_name, email, phone_number). The consent subobject is
+        shape-only flags (analytics / preferences / marketing /
+        sale_of_data). Capturing the consent subobject gives
+        dashboards the privacy-preference signal without persisting
+        PII.
+
+        Strict whitelist on both keys and value types:
+          * Only the four documented consent flags are serialized
+            (analytics / preferences / marketing / sale_of_data).
+            A malformed or extended sender that nests PII fields
+            (e.g. ``consent.email``) would otherwise leak PII into
+            the safe-by-default column before any redaction runs.
+          * Values are restricted to ``bool``. The consent spec is
+            shape-only flags; non-boolean values (strings, dicts,
+            lists) are silently dropped.
+
+        Source is anchored at ``body.buyer.consent``: we never widen
+        to the parent or to any sibling field, and we don't infer a
+        consent shape from anywhere else. If consent is missing,
+        non-dict, or yields no whitelisted flags after filtering,
+        the column stays NULL.
+        """
+        if not isinstance(buyer, dict):
+            return
+        consent = buyer.get("consent")
+        if not isinstance(consent, dict) or not consent:
+            return
+        filtered: Dict[str, bool] = {
+            key: value
+            for key, value in consent.items()
+            if key in _BUYER_CONSENT_FIELDS and isinstance(value, bool)
+        }
+        if filtered:
+            result["buyer_consent_json"] = json.dumps(filtered)
 
     @classmethod
     def _extract_discovery_payment(cls, payment: Any, result: Dict[str, Any]) -> None:

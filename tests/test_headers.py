@@ -8,6 +8,8 @@ extra isn't installed.
 from __future__ import annotations
 
 from ucp_analytics._headers import (
+    credential_sha256,
+    decode_jose_header,
     is_signed,
     lookup_header,
     parse_bearer_challenge,
@@ -140,6 +142,95 @@ class TestSignatureKeyid:
         # `keyid` must be its own structured-field parameter; a header
         # with only other parameters (no keyid) returns None.
         assert signature_keyid({"Signature-Input": 'sig1=();foo="bar"'}) is None
+
+
+class TestDecodeJoseHeader:
+    """A4 — decode_jose_header decodes ONLY the first dot-separated
+    segment (the JOSE header) of a JWS / JWT / SD-JWT credential.
+    Never the payload, never the disclosures."""
+
+    def test_decodes_standard_header(self):
+        # base64url({"alg":"ES256","kid":"k1"})
+        header = "eyJhbGciOiJFUzI1NiIsImtpZCI6ImsxIn0"
+        # Detached JWS form: header..signature
+        result = decode_jose_header(f"{header}..signature-data")
+        assert result == {"alg": "ES256", "kid": "k1"}
+
+    def test_decodes_with_padding_stripped(self):
+        # RFC 7515 allows omitting `=` padding from base64url. Our
+        # decoder restores it. Header here is 28 chars; raw base64
+        # would need `=` padding to be a multiple of 4.
+        header = "eyJhbGciOiJFUzI1NiIsImtpZCI6ImsxIn0"
+        # Already 35 chars (no padding); decode should still work.
+        result = decode_jose_header(f"{header}.payload.signature")
+        assert result is not None
+        assert result["alg"] == "ES256"
+
+    def test_decodes_sd_jwt_header_with_typ(self):
+        # base64url({"alg":"ES256","kid":"buyer","typ":"vc+sd-jwt"})
+        header = "eyJhbGciOiJFUzI1NiIsImtpZCI6ImJ1eWVyIiwidHlwIjoidmMrc2Qtand0In0"
+        # SD-JWT+kb shape: header.payload.sig~disclosures...
+        result = decode_jose_header(f"{header}.payload.sig~d1~d2")
+        assert result == {"alg": "ES256", "kid": "buyer", "typ": "vc+sd-jwt"}
+
+    def test_none_input_returns_none(self):
+        assert decode_jose_header(None) is None
+
+    def test_non_string_returns_none(self):
+        assert decode_jose_header(42) is None
+        assert decode_jose_header(["a", "b"]) is None
+        assert decode_jose_header({"already": "decoded"}) is None
+
+    def test_empty_string_returns_none(self):
+        assert decode_jose_header("") is None
+
+    def test_no_dot_returns_none(self):
+        # Not a JWS/JWT shape at all.
+        assert decode_jose_header("just-a-string") is None
+
+    def test_invalid_base64_returns_none(self):
+        # First segment isn't valid base64url.
+        assert decode_jose_header("!!!.payload.signature") is None
+
+    def test_valid_base64_but_not_json_returns_none(self):
+        # base64url of "hello world" decodes successfully but isn't JSON.
+        import base64
+
+        not_json = base64.urlsafe_b64encode(b"hello world").decode("ascii").rstrip("=")
+        assert decode_jose_header(f"{not_json}.payload.sig") is None
+
+    def test_valid_base64_json_but_not_dict_returns_none(self):
+        # base64url of `[1,2,3]` — decodes to JSON but a list, not a dict.
+        import base64
+
+        encoded = base64.urlsafe_b64encode(b"[1,2,3]").decode("ascii").rstrip("=")
+        assert decode_jose_header(f"{encoded}.payload.sig") is None
+
+
+class TestCredentialSha256:
+    """A4 — credential_sha256 computes a hex SHA-256 of the credential
+    string treated as opaque. Lets dashboards correlate the same
+    credential across rows without persisting the credential itself."""
+
+    def test_hashes_string(self):
+        import hashlib
+
+        credential = "eyJhbGciOiJFUzI1NiJ9..sig"
+        expected = hashlib.sha256(credential.encode("utf-8")).hexdigest()
+        assert credential_sha256(credential) == expected
+
+    def test_none_returns_none(self):
+        assert credential_sha256(None) is None
+
+    def test_empty_string_returns_none(self):
+        # Hashing the empty string is technically defined, but we
+        # treat it as missing data — column stays NULL.
+        assert credential_sha256("") is None
+
+    def test_non_string_returns_none(self):
+        assert credential_sha256(42) is None
+        assert credential_sha256({"value": "x"}) is None
+        assert credential_sha256(["a", "b"]) is None
 
 
 class TestSignatureAlgFromJwk:
