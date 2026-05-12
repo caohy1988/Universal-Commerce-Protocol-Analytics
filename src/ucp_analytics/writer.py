@@ -48,6 +48,15 @@ BQ_SCHEMA_FIELDS = [
     ("ap2_mandate_metadata_json", "JSON", "NULLABLE"),
     ("buyer_consent_json", "JSON", "NULLABLE"),
     ("ap2_mandate_raw_json", "JSON", "NULLABLE"),
+    # A6: Authorization & abuse signals. Safe-by-default columns
+    # observe only presence + key names (`dev.ucp.buyer_ip`,
+    # `dev.ucp.user_agent`, etc.) — never the values which carry
+    # IP / user-agent / fingerprint data. The opt-in raw column
+    # carries the signals object after `_redact` with known PII
+    # signal keys force-included.
+    ("signals_present", "BOOL", "NULLABLE"),
+    ("signals_keys_json", "JSON", "NULLABLE"),
+    ("signals_json", "JSON", "NULLABLE"),
     # HTTP
     ("http_method", "STRING", "NULLABLE"),
     ("http_path", "STRING", "NULLABLE"),
