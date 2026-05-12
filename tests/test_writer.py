@@ -167,6 +167,12 @@ class TestGetDDL:
         assert "eligibility_not_accepted_present BOOL" in ddl
         assert "eligibility_invalid_present BOOL" in ddl
 
+    def test_totals_and_order_label_columns_present(self):
+        """B1/C9/C7 finisher — pin the three new columns in the DDL."""
+        ddl = get_ddl("p", "d", "t")
+        assert "totals_json JSON" in ddl
+        assert "order_label STRING" in ddl
+
     def test_signals_columns_present(self):
         """A6 — pin all three signals columns in the DDL."""
         ddl = get_ddl("p", "d", "t")
