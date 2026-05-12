@@ -127,7 +127,7 @@ The core package depends only on `google-cloud-bigquery` and `httpx`. Optional i
 
 ## 4. Event Classification
 
-### 4.1 Event Type Mapping (29 types)
+### 4.1 Event Type Mapping (32 types)
 
 Events are automatically classified from HTTP method + path + response body. Path matching uses strict regex patterns to avoid false positives (e.g. `/orders` matches but `/reorder` does not). For MCP/A2A transports, `classify_jsonrpc()` maps tool names to the same event types.
 
@@ -156,6 +156,14 @@ The webhook branch runs before the `/orders` REST branch in the classifier, so a
 | `GET /carts/{id}` | `cart_get` | Cart retrieved |
 | `PUT /carts/{id}` | `cart_updated` | Cart updated (items added/removed) |
 | `POST /carts/{id}/cancel` | `cart_canceled` | Cart explicitly canceled |
+
+#### Catalog (3)
+
+| HTTP Operation | Event Type | Trigger |
+|---|---|---|
+| `POST /catalog/search` | `catalog_search` | Catalog search query |
+| `POST /catalog/lookup` | `catalog_lookup` | Catalog item lookup by ID |
+| `POST /catalog/product` | `catalog_product_get` | Single product detail fetch |
 
 #### Order (8)
 
@@ -224,7 +232,7 @@ For MCP and A2A transports, `classify_jsonrpc()` maps tool names to event types 
 | `add_to_checkout`, `remove_from_checkout`, `update_customer_details` | `checkout_session_updated` |
 | `start_payment` | `checkout_session_updated` (pre-completion step) |
 | `create_cart`, `a2a.ucp.cart.create` | `cart_created` |
-| `get_order`, `a2a.ucp.order.get` | `order_updated` (refined by response body status) |
+| `get_order`, `a2a.ucp.order.get` | `order_get` (refined by lifecycle from the response body) |
 | `order_event_webhook` | *(by request body status)* |
 | `link_identity`, `a2a.ucp.identity.link` | `identity_link_initiated` |
 | `negotiate_capability`, `a2a.ucp.capability.negotiate` | `capability_negotiated` |
@@ -421,7 +429,7 @@ Safe-by-default columns capture only key names; the raw column is opt-in via `in
 
 ### 6.2 PII Redaction
 
-`UCPAnalyticsTracker._redact` recursively walks JSON bodies, replacing configured fields with `[REDACTED]` when `key.lower() in self.pii_fields`. Defaults: `email`, `phone`, `first_name`, `last_name`, `phone_number`, `street_address`, `postal_code`. Operators can extend via the `pii_fields` constructor parameter.
+`UCPAnalyticsTracker._redact` recursively walks JSON bodies, replacing configured fields with `[REDACTED]` when `key.lower() in self.pii_fields`. Defaults: `email`, `phone`, `first_name`, `last_name`, `phone_number`, `street_address`, `postal_code`. The `pii_fields` constructor parameter **replaces** the defaults wholesale (it is not additive) — operators who want to keep the documented PII names should include them in their custom list. The force-included keys below are OR'd in regardless.
 
 The redaction set has four documented PII keys **force-included** regardless of operator config so a custom `pii_fields` list cannot accidentally disable safety:
 
@@ -534,14 +542,14 @@ Eight runnable examples are included (see [`examples/README.md`](../examples/REA
 | `order_lifecycle_demo.py` | Yes | REST | Order delivered/returned/canceled (8 types) |
 | `transport_demo.py` | Yes | REST/MCP/A2A | All 3 transports compared (5 types) |
 | `identity_payment_demo.py` | Yes | REST | Identity linking + payment flows (10 types) |
-| `bq_demo.py` | Yes | REST/MCP/A2A | All 27 event types, 3 transports, BQ verification |
-| `bq_adk_demo.py` | Yes | ADK/MCP/A2A | All 27 event types via ADK plugin, BQ verification |
+| `bq_demo.py` | Yes | REST/MCP/A2A | Every event type, 3 transports, BQ verification |
+| `bq_adk_demo.py` | Yes | ADK/MCP/A2A | Every event type via ADK plugin, BQ verification |
 
 Shared BigQuery configuration (`PROJECT_ID`, `DATASET_ID`, `TABLE_ID`) lives in `examples/_demo_utils.py` and reads from the `GCP_PROJECT_ID` environment variable.
 
 **Local demo (no GCP):** `e2e_demo.py` starts a mini UCP merchant server (FastAPI, port 8199) with a flower shop catalog, runs a shopping agent through the full happy path (discovery → checkout → payment → shipment), writes 6 events to local SQLite, and prints an analytics report.
 
-**Comprehensive demos:** `bq_demo.py` and `bq_adk_demo.py` each exercise all 27 event types across REST, MCP, and A2A transports, then query BigQuery to verify all events landed correctly.
+**Comprehensive demos:** `bq_demo.py` and `bq_adk_demo.py` each exercise every event type across REST, MCP, and A2A transports, then query BigQuery to verify all events landed correctly. (`src/ucp_analytics/events.py::UCPEventType` is the canonical list — the demos enumerate it directly rather than hard-coding a count, so coverage stays in sync as new event types land.)
 
 ---
 
@@ -558,7 +566,7 @@ Shared BigQuery configuration (`PROJECT_ID`, `DATASET_ID`, `TABLE_ID`) lives in 
 | `batch_size` | `50` | Events buffered before flush |
 | `auto_create_table` | `True` | Create dataset/table on first write |
 | `redact_pii` | `False` | Recursively redact configured PII fields in bodies before extraction |
-| `pii_fields` | (defaults) | Override the default PII redaction set — AP2 credential keys + documented PII signal keys are always force-included |
+| `pii_fields` | (defaults) | **Override** (not extend) the default redaction set. Passing a list replaces the defaults (`email`, `phone`, `first_name`, `last_name`, `phone_number`, `street_address`, `postal_code`) wholesale — include them in your own list to preserve them. The force-included keys (AP2 credentials, documented PII signals) are always OR'd in afterward regardless of operator config. |
 | `custom_metadata` | `None` | Dict attached as JSON to every event |
 | `webhook_path_prefixes` | `()` | Additional path prefixes the operator's platform publishes for order webhooks (UCP `order.md`: "The URL format is platform-specific") |
 | `jwk_lookup` | `None` | Callable `(keyid: str) -> Optional[Mapping]` used to derive `request_signature_alg` / `response_signature_alg` from JWK `crv` |

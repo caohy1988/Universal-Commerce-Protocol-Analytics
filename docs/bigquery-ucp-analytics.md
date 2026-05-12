@@ -335,7 +335,7 @@ await tracker.close()
 | `batch_size` | `int` | `50` | Flush to BigQuery every N events |
 | `auto_create_table` | `bool` | `True` | Create dataset + table on first write |
 | `redact_pii` | `bool` | `False` | Recursively redact PII fields in bodies before extraction |
-| `pii_fields` | `list[str]` | `["email", "phone", ...]` | Override the redaction set. AP2 credential names (`merchant_authorization`, `checkout_mandate`) and documented PII signal keys (`dev.ucp.buyer_ip`, `dev.ucp.user_agent`) are always force-included regardless of operator config. |
+| `pii_fields` | `list[str]` | `["email", "phone", ...]` | **Override** (not extend) the redaction set. Passing a list replaces the defaults (`email`, `phone`, `first_name`, `last_name`, `phone_number`, `street_address`, `postal_code`) wholesale — include them in your own list to keep them. AP2 credential names (`merchant_authorization`, `checkout_mandate`) and documented PII signal keys (`dev.ucp.buyer_ip`, `dev.ucp.user_agent`) are always force-included afterward regardless of operator config. |
 | `custom_metadata` | `dict[str, str]` | `None` | Static key-value pairs added as JSON to every event |
 | `webhook_path_prefixes` | `list[str]` | `None` | Additional path prefixes for order webhooks (per UCP `order.md`: *"The URL format is platform-specific"*). The Standard Webhooks header pair (`Webhook-Id` + `Webhook-Timestamp`) also triggers detection on unknown paths, suppressed on known UCP REST paths. |
 | `jwk_lookup` | `Callable[[str], Optional[Mapping]]` | `None` | Operator-provided keyid → JWK lookup. Used to derive `request_signature_alg` / `response_signature_alg` from the JWK's `crv` per UCP `signatures.md`. When absent, the alg columns stay NULL. |
@@ -628,6 +628,14 @@ classifier handles all UCP resource types:
 | `cart_updated` | `PUT /carts/{id}` | Cart items or metadata updated |
 | `cart_canceled` | `POST /carts/{id}/cancel` | Cart abandoned or canceled |
 
+### Catalog Events
+
+| Event Type | Trigger | Description |
+|---|---|---|
+| `catalog_search` | `POST /catalog/search` | Catalog search query |
+| `catalog_lookup` | `POST /catalog/lookup` | Catalog item lookup by ID |
+| `catalog_product_get` | `POST /catalog/product` | Single product detail fetch |
+
 ### Order Events
 
 | Event Type | Trigger | Description |
@@ -772,8 +780,26 @@ recursively to nested objects and arrays. Non-string dict keys (int / None /
 tuple) are handled gracefully — they can't match `pii_fields` but the value
 side is still walked for nested string-keyed PII.
 
-Default PII fields: `email`, `phone`, `first_name`, `last_name`, `phone_number`,
-`street_address`, `postal_code`.
+**Defaults:** `email`, `phone`, `first_name`, `last_name`, `phone_number`, `street_address`, `postal_code`.
+
+The `pii_fields` constructor parameter **replaces** these defaults — it is *not* additive. Operators who want to keep the documented PII names AND add their own should include the defaults in their custom list:
+
+```python
+tracker = UCPAnalyticsTracker(
+    project_id="my-gcp-project",
+    redact_pii=True,
+    pii_fields=[
+        # Keep the documented defaults...
+        "email", "phone", "first_name", "last_name",
+        "phone_number", "street_address", "postal_code",
+        # ...and add merchant-specific PII keys.
+        "ssn",
+        "dev.merchant.account_number",
+    ],
+)
+```
+
+The force-included keys (next section) are always OR'd in after the operator's list, so they cannot be accidentally turned off.
 
 ### Force-included PII keys
 
@@ -1034,7 +1060,7 @@ rate, and session timeline debugging.
 ## Examples
 
 Eight runnable examples are included in the [`examples/`](../examples/) directory,
-covering all 27 UCP event types:
+covering every UCP event type (the canonical list lives in `src/ucp_analytics/events.py::UCPEventType`; the demos enumerate it directly so coverage stays in sync as new types land):
 
 | Example | BigQuery? | Transport | Purpose |
 |---|---|---|---|
@@ -1044,8 +1070,8 @@ covering all 27 UCP event types:
 | `order_lifecycle_demo.py` | Yes (BigQuery) | REST | Order delivered/returned/canceled |
 | `transport_demo.py` | Yes (BigQuery) | REST/MCP/A2A | All 3 transport comparisons |
 | `identity_payment_demo.py` | Yes (BigQuery) | REST | Identity linking + payment flows |
-| `bq_demo.py` | Yes | REST/MCP/A2A | Comprehensive — all 27 event types, 3 transports, SDK models, BQ verification |
-| `bq_adk_demo.py` | Yes | ADK/MCP/A2A | Comprehensive ADK — all 27 event types, 3 transports, SDK models, BQ verification |
+| `bq_demo.py` | Yes | REST/MCP/A2A | Comprehensive — every event type, 3 transports, SDK models, BQ verification |
+| `bq_adk_demo.py` | Yes | ADK/MCP/A2A | Comprehensive ADK — every event type, 3 transports, SDK models, BQ verification |
 
 ### Quick Start (No GCP)
 
