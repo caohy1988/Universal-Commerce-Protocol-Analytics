@@ -1,6 +1,6 @@
 [project]
 name = "ucp-analytics"
-version = "0.1.0"
+version = "0.2.0"
 description = "BigQuery-backed commerce analytics for the Universal Commerce Protocol (UCP)"
 readme = "README.md"
 license = "Apache-2.0"

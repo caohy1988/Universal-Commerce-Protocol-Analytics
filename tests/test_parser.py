@@ -1490,6 +1490,35 @@ class TestClassifyJsonRPC:
             == UCPEventType.ORDER_DELIVERED
         )
 
+    def test_mcp_update_order_classifies_as_order_updated(self):
+        """B5 / ADK-parity regression. The `update_order` MCP tool
+        maps to `PUT /orders/{id}` and a no-lifecycle body falls
+        through the lifecycle helper to ORDER_UPDATED. Without the
+        parser._TOOL_TO_HTTP entry, the same tool emitted REQUEST
+        through `record_jsonrpc` while the ADK plugin emitted
+        ORDER_UPDATED — a KPI-divergence trap across transports."""
+        assert (
+            UCPResponseParser.classify_jsonrpc(
+                "update_order",
+                200,
+                {"id": "order_xyz", "checkout_id": "chk_a", "status": "confirmed"},
+            )
+            == UCPEventType.ORDER_UPDATED
+        )
+
+    def test_a2a_order_update_classifies_as_order_updated(self):
+        """Symmetric A2A action `a2a.ucp.order.update` lands on the
+        same mapping. Pin so the two MCP/A2A spellings can't drift
+        independently."""
+        assert (
+            UCPResponseParser.classify_jsonrpc(
+                "a2a.ucp.order.update",
+                200,
+                {"id": "order_xyz", "checkout_id": "chk_a", "status": "confirmed"},
+            )
+            == UCPEventType.ORDER_UPDATED
+        )
+
     def test_a2a_checkout_create(self):
         assert (
             UCPResponseParser.classify_jsonrpc("a2a.ucp.checkout.create")

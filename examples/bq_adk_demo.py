@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ADK + BigQuery Comprehensive Demo — All 27 Event Types, 3 Transports
+ADK + BigQuery Comprehensive Demo — Every Event Type, 3 Transports
 ======================================================================
 
 Demonstrates the UCPAgentAnalyticsPlugin with simulated ADK tool flows
@@ -35,7 +35,7 @@ from ucp_analytics.adk_plugin import UCPAgentAnalyticsPlugin
 
 APP_NAME = "bq_adk_demo"
 
-ALL_27_EVENT_TYPES = sorted(e.value for e in UCPEventType)
+ALL_EVENT_TYPES = sorted(e.value for e in UCPEventType)
 
 # ==========================================================================
 # Simulated ADK Tool Interface
@@ -288,6 +288,40 @@ ORDER_DELIVERED_RESULT = {**ORDER_CREATED_RESULT, "status": "delivered"}
 ORDER_RETURNED_RESULT = {**ORDER_CREATED_RESULT, "status": "returned"}
 ORDER_CANCELED_RESULT = {**ORDER_CREATED_RESULT, "status": "canceled"}
 
+# Order body for a PUT (REST mutation) — keep `status: confirmed`
+# so the lifecycle helper returns None and the classifier falls
+# through to ORDER_UPDATED.
+ORDER_UPDATED_RESULT = {**ORDER_CREATED_RESULT, "label": "ORD-2026-00042"}
+
+# Webhook delivery without recognizable lifecycle — no
+# fulfillment.events, no adjustments, no legacy status. The
+# classifier enters the webhook branch (path matches /webhook(s))
+# and falls all the way through to ORDER_WEBHOOK_RECEIVED.
+ORDER_WEBHOOK_RECEIVED_RESULT = {
+    "id": ORDER_ID,
+    "checkout_id": SESSION_ID,
+}
+
+# Catalog results — shape-only fixtures, no PII.
+CATALOG_SEARCH_RESULT = {
+    "products": [
+        {"id": "bouquet_roses", "title": "Rose Bouquet", "price": 2999},
+    ],
+    "query": "roses",
+}
+CATALOG_LOOKUP_RESULT = {
+    "products": [
+        {"id": "bouquet_roses", "title": "Rose Bouquet", "price": 2999},
+        {"id": "sunflower_bunch", "title": "Sunflower Bunch", "price": 1999},
+    ],
+}
+CATALOG_PRODUCT_RESULT = {
+    "id": "bouquet_roses",
+    "title": "Rose Bouquet",
+    "price": 2999,
+    "variants": [],
+}
+
 
 # ==========================================================================
 # Simulate ADK tool call
@@ -324,21 +358,41 @@ async def simulate_tool_call(
 
 
 # ==========================================================================
-# Phase 1: Plugin-based tool calls (17 event types via _TOOL_TO_HTTP)
+# Phase 1: Plugin-based tool calls (22 event types via _TOOL_TO_HTTP)
 # ==========================================================================
 
 
 async def run_plugin_phase(plugin: UCPAgentAnalyticsPlugin):
     """Run all plugin-classifiable tool calls."""
     print("\n" + "=" * 70)
-    print("  PHASE 1: ADK Plugin Tool Calls (17 event types)")
+    print("  PHASE 1: ADK Plugin Tool Calls (22 event types)")
     print("=" * 70)
 
     steps = [
         # (tool_name, args, result, label)
         (
-            "discover_merchant", {},
-            DISCOVERY_RESULT, "profile_discovered",
+            "discover_merchant",
+            {},
+            DISCOVERY_RESULT,
+            "profile_discovered",
+        ),
+        (
+            "catalog_search",
+            {"query": "roses"},
+            CATALOG_SEARCH_RESULT,
+            "catalog_search",
+        ),
+        (
+            "catalog_lookup",
+            {"ids": ["bouquet_roses", "sunflower_bunch"]},
+            CATALOG_LOOKUP_RESULT,
+            "catalog_lookup",
+        ),
+        (
+            "get_product",
+            {"id": "bouquet_roses"},
+            CATALOG_PRODUCT_RESULT,
+            "catalog_product_get",
         ),
         (
             "create_checkout",
@@ -353,12 +407,16 @@ async def run_plugin_phase(plugin: UCPAgentAnalyticsPlugin):
             "checkout_session_updated",
         ),
         (
-            "update_checkout", {"session_id": SESSION_ID},
-            CHECKOUT_ESCALATION_RESULT, "checkout_escalation",
+            "update_checkout",
+            {"session_id": SESSION_ID},
+            CHECKOUT_ESCALATION_RESULT,
+            "checkout_escalation",
         ),
         (
-            "get_checkout", {"session_id": SESSION_ID},
-            CHECKOUT_GET_RESULT, "checkout_session_get",
+            "get_checkout",
+            {"session_id": SESSION_ID},
+            CHECKOUT_GET_RESULT,
+            "checkout_session_get",
         ),
         (
             "complete_checkout",
@@ -367,52 +425,97 @@ async def run_plugin_phase(plugin: UCPAgentAnalyticsPlugin):
             "checkout_session_completed",
         ),
         (
-            "cancel_checkout", {"session_id": SESSION2_ID},
-            CHECKOUT_CANCELED_RESULT, "checkout_session_canceled",
+            "cancel_checkout",
+            {"session_id": SESSION2_ID},
+            CHECKOUT_CANCELED_RESULT,
+            "checkout_session_canceled",
         ),
         (
             "create_cart",
             {"line_items": [{"item_id": "sunflowers", "quantity": 2}]},
-            CART_CREATED_RESULT, "cart_created",
+            CART_CREATED_RESULT,
+            "cart_created",
         ),
         (
             "update_cart",
-            {"cart_id": CART_ID, "line_items": [
-                {"item_id": "sunflowers", "quantity": 3},
-            ]},
-            CART_UPDATED_RESULT, "cart_updated",
+            {
+                "cart_id": CART_ID,
+                "line_items": [
+                    {"item_id": "sunflowers", "quantity": 3},
+                ],
+            },
+            CART_UPDATED_RESULT,
+            "cart_updated",
         ),
         (
-            "get_cart", {"cart_id": CART_ID},
-            CART_GET_RESULT, "cart_get",
+            "get_cart",
+            {"cart_id": CART_ID},
+            CART_GET_RESULT,
+            "cart_get",
         ),
         (
-            "cancel_cart", {"cart_id": CART_ID},
-            CART_CANCELED_RESULT, "cart_canceled",
+            "cancel_cart",
+            {"cart_id": CART_ID},
+            CART_CANCELED_RESULT,
+            "cart_canceled",
         ),
         (
-            "create_order", {"checkout_id": SESSION_ID},
-            ORDER_CREATED_RESULT, "order_created",
+            "create_order",
+            {"checkout_id": SESSION_ID},
+            ORDER_CREATED_RESULT,
+            "order_created",
         ),
         (
-            "get_order", {"order_id": ORDER_ID},
-            ORDER_CONFIRMED_RESULT, "order_updated",
+            # GET /orders/{id} with a body that has no recognizable
+            # lifecycle status (legacy `confirmed` isn't mapped by
+            # the c5c6139 lifecycle helper) -> order_get under the
+            # new B5 / B8 taxonomy.
+            "get_order",
+            {"order_id": ORDER_ID},
+            ORDER_CONFIRMED_RESULT,
+            "order_get",
         ),
         (
-            "simulate_shipping", {"order_id": ORDER_ID},
-            ORDER_SHIPPED_RESULT, "order_shipped",
+            "simulate_shipping",
+            {"order_id": ORDER_ID},
+            ORDER_SHIPPED_RESULT,
+            "order_shipped",
         ),
         (
-            "get_order", {"order_id": ORDER_ID},
-            ORDER_DELIVERED_RESULT, "order_delivered",
+            "get_order",
+            {"order_id": ORDER_ID},
+            ORDER_DELIVERED_RESULT,
+            "order_delivered",
         ),
         (
-            "get_order", {"order_id": ORDER_ID},
-            ORDER_RETURNED_RESULT, "order_returned",
+            "get_order",
+            {"order_id": ORDER_ID},
+            ORDER_RETURNED_RESULT,
+            "order_returned",
         ),
         (
-            "get_order", {"order_id": ORDER_ID},
-            ORDER_CANCELED_RESULT, "order_canceled",
+            "get_order",
+            {"order_id": ORDER_ID},
+            ORDER_CANCELED_RESULT,
+            "order_canceled",
+        ),
+        (
+            # PUT /orders/{id} with a confirmed (no-lifecycle) body →
+            # falls through to ORDER_UPDATED (the REST-mutation type,
+            # distinct from order_get and order_webhook_received).
+            "update_order",
+            {"order_id": ORDER_ID, "label": "ORD-2026-00042"},
+            ORDER_UPDATED_RESULT,
+            "order_updated",
+        ),
+        (
+            # POST /webhooks/partners/{id}/events/order with a body
+            # carrying no recognizable lifecycle → ORDER_WEBHOOK_RECEIVED
+            # (B5b: don't pivot taxonomy on URL format).
+            "order_event_webhook",
+            {"order_id": ORDER_ID},
+            ORDER_WEBHOOK_RECEIVED_RESULT,
+            "order_webhook_received",
         ),
     ]
 
@@ -503,10 +606,12 @@ async def run_direct_events(tracker: UCPAnalyticsTracker):
             event_type="capability_negotiated",
             app_name=APP_NAME,
             ucp_version=UCP_VERSION,
-            capabilities_json=json.dumps([
-                {"name": "dev.ucp.shopping.checkout", "version": UCP_VERSION},
-                {"name": "dev.ucp.shopping.fulfillment", "version": UCP_VERSION},
-            ]),
+            capabilities_json=json.dumps(
+                [
+                    {"name": "dev.ucp.shopping.checkout", "version": UCP_VERSION},
+                    {"name": "dev.ucp.shopping.fulfillment", "version": UCP_VERSION},
+                ]
+            ),
             latency_ms=10.0,
         ),
         # Error event
@@ -552,14 +657,21 @@ async def run_mcp_transport(tracker: UCPAnalyticsTracker):
         ("complete_checkout", CHECKOUT_COMPLETED_RESULT),
         ("create_cart", CART_CREATED_RESULT),
         ("get_order", ORDER_CONFIRMED_RESULT),
-        ("link_identity", {
-            "provider": "google", "scope": "profile email",
-            "status": "pending",
-        }),
+        (
+            "link_identity",
+            {
+                "provider": "google",
+                "scope": "profile email",
+                "status": "pending",
+            },
+        ),
         ("revoke_identity", {"status": "revoked"}),
-        ("negotiate_capability", {
-            "ucp": {"version": UCP_VERSION},
-        }),
+        (
+            "negotiate_capability",
+            {
+                "ucp": {"version": UCP_VERSION},
+            },
+        ),
     ]
 
     for tool_name, body in mcp_calls:
@@ -592,14 +704,21 @@ async def run_a2a_transport(tracker: UCPAnalyticsTracker):
         ("a2a.ucp.checkout.complete", CHECKOUT_COMPLETED_RESULT),
         ("a2a.ucp.cart.create", CART_CREATED_RESULT),
         ("a2a.ucp.order.get", ORDER_CONFIRMED_RESULT),
-        ("a2a.ucp.identity.link", {
-            "provider": "google", "scope": "profile email",
-            "status": "pending",
-        }),
+        (
+            "a2a.ucp.identity.link",
+            {
+                "provider": "google",
+                "scope": "profile email",
+                "status": "pending",
+            },
+        ),
         ("a2a.ucp.identity.revoke", {"status": "revoked"}),
-        ("a2a.ucp.capability.negotiate", {
-            "ucp": {"version": UCP_VERSION},
-        }),
+        (
+            "a2a.ucp.capability.negotiate",
+            {
+                "ucp": {"version": UCP_VERSION},
+            },
+        ),
     ]
 
     for tool_name, body in a2a_calls:
@@ -644,7 +763,7 @@ async def verify_bigquery():
     from google.cloud import bigquery
 
     print("\n" + "=" * 70)
-    print("  BIGQUERY VERIFICATION — All 27 Event Types")
+    print("  BIGQUERY VERIFICATION — Every Event Type")
     print("=" * 70)
 
     client = bigquery.Client(project=PROJECT_ID)
@@ -701,14 +820,14 @@ async def verify_bigquery():
 
     # Verification checks
     found_types = set(event_map.keys())
-    expected_types = set(ALL_27_EVENT_TYPES)
+    expected_types = set(ALL_EVENT_TYPES)
     missing = expected_types - found_types
     extra = found_types - expected_types
 
-    print(f"\n   Event types found: {len(found_types)}/27")
+    print(f"\n   Event types found: {len(found_types)}/{len(ALL_EVENT_TYPES)}")
 
     print("\n   Verification:")
-    print(f"     [{'PASS' if not missing else 'FAIL'}] All 27 event types present")
+    print(f"     [{'PASS' if not missing else 'FAIL'}] Every event type present")
     if missing:
         print(f"       Missing: {sorted(missing)}")
     if extra:
@@ -777,7 +896,7 @@ async def main():
         auto_create_table=True,
     )
 
-    # Phase 1: Plugin-based tool calls (17 event types)
+    # Phase 1: Plugin-based tool calls (22 event types)
     await run_plugin_phase(plugin)
 
     # Phase 2: Direct tracker events (10 event types)

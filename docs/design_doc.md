@@ -1,9 +1,10 @@
 # UCP Analytics — Design Document
 
 **Author:** Haiyuan Cao
-**Status:** Draft
-**Version:** 0.1
-**Date:** February 18, 2026
+**Status:** Released
+**Version:** 0.2.0
+**Date:** May 11, 2026
+**Spec target:** UCP [`c5c6139`](https://github.com/Universal-Commerce-Protocol/ucp/commit/c5c6139) (2026-05-06)
 **Repository:** [haiyuan-eng-google/Universal-Commerce-Protocol-Analytics](https://github.com/haiyuan-eng-google/Universal-Commerce-Protocol-Analytics)
 
 ---
@@ -126,9 +127,15 @@ The core package depends only on `google-cloud-bigquery` and `httpx`. Optional i
 
 ## 4. Event Classification
 
-### 4.1 Event Type Mapping (27 types)
+### 4.1 Event Type Mapping (32 types)
 
 Events are automatically classified from HTTP method + path + response body. Path matching uses strict regex patterns to avoid false positives (e.g. `/orders` matches but `/reorder` does not). For MCP/A2A transports, `classify_jsonrpc()` maps tool names to the same event types.
+
+Webhook detection in 0.2.0 layers two signals on top of path matching:
+- An operator-configured `webhook_path_prefixes` list on the tracker for platforms that publish webhook URLs other than `/webhook(s)` (UCP `order.md`: *"The URL format is platform-specific"*).
+- A Standard Webhooks header fallback (`Webhook-Id` + `Webhook-Timestamp` together) for unknown URLs — suppressed on known non-webhook UCP paths so a malicious header-stamp on `/checkout-sessions` can't override URL semantics.
+
+The webhook branch runs before the `/orders` REST branch in the classifier, so a platform that publishes `/webhooks/orders` correctly classifies as a webhook delivery rather than a REST `/orders` endpoint.
 
 #### Checkout (6)
 
@@ -150,30 +157,43 @@ Events are automatically classified from HTTP method + path + response body. Pat
 | `PUT /carts/{id}` | `cart_updated` | Cart updated (items added/removed) |
 | `POST /carts/{id}/cancel` | `cart_canceled` | Cart explicitly canceled |
 
-#### Order (6)
+#### Catalog (3)
 
 | HTTP Operation | Event Type | Trigger |
 |---|---|---|
-| `POST /orders` | `order_created` | Order webhook from merchant |
-| `GET /orders/{id}` *(status=confirmed)* | `order_updated` | Order status retrieval |
-| `GET /orders/{id}` *(status=shipped)* | `order_shipped` | Shipment tracking available |
-| `GET /orders/{id}` *(status=delivered)* | `order_delivered` | Delivery confirmed |
-| `GET /orders/{id}` *(status=returned)* | `order_returned` | Return processed |
-| `GET /orders/{id}` *(status=canceled)* | `order_canceled` | Order canceled |
-| `POST /webhooks/partners/{id}/events/order` | *(by request body status)* | Upstream partner webhook — classifies as `order_shipped`, `order_delivered`, `order_returned`, `order_canceled`, or `order_updated` based on the order status in the request body |
-| `POST /webhooks/order-delivered` | `order_delivered` | Legacy webhook path |
-| `POST /webhooks/order-returned` | `order_returned` | Legacy webhook path |
-| `POST /webhooks/order-canceled` | `order_canceled` | Legacy webhook path |
+| `POST /catalog/search` | `catalog_search` | Catalog search query |
+| `POST /catalog/lookup` | `catalog_lookup` | Catalog item lookup by ID |
+| `POST /catalog/product` | `catalog_product_get` | Single product detail fetch |
 
-**Note:** For webhook paths, the order payload is in the **request** body (the response is typically an ack like `{"status": "ok"}`). The classifier and tracker use `request_body` for both classification and field extraction on webhook paths. Webhook 4xx/5xx responses classify as `error` rather than falling through to `order_updated`.
+#### Order (8)
+
+| HTTP Operation | Event Type | Trigger |
+|---|---|---|
+| `POST /orders` | `order_created` | New order created |
+| `GET /orders/{id}` *(no lifecycle)* | `order_get` | Read-only poll of order state |
+| `PUT /orders/{id}` *(no lifecycle)* | `order_updated` | REST-driven order mutation |
+| `GET`/`PUT` `/orders/{id}` *(fulfillment.events[].type=shipped or in_transit)* | `order_shipped` | Latest shipment event is shipped / in_transit |
+| `GET`/`PUT` `/orders/{id}` *(...=delivered)* | `order_delivered` | Latest shipment event is delivered |
+| `GET`/`PUT` `/orders/{id}` *(...=returned_to_sender or adjustments[].type=refund/return)* | `order_returned` | Return processed |
+| `GET`/`PUT` `/orders/{id}` *(...=canceled/undeliverable or adjustments[].type=cancellation)* | `order_canceled` | Order canceled |
+| Webhook delivery without recognizable lifecycle | `order_webhook_received` | Webhook detected (path prefix or header pair) but body has no recognizable lifecycle status |
+| `POST /webhooks/order-delivered` | `order_delivered` | Legacy URL-segment fallback (body-driven wins when present) |
+| `POST /webhooks/order-returned` | `order_returned` | Legacy URL-segment fallback |
+| `POST /webhooks/order-canceled` | `order_canceled` | Legacy URL-segment fallback |
+
+**Lifecycle derivation priority (B8, c5c6139 schema):** At `c5c6139`, `order.json` no longer carries a top-level `status`. Lifecycle is derived from (1) the latest `fulfillment.events[].type` by RFC 3339 `occurred_at`, (2) the latest `adjustments[].type` if no fulfillment event matches, then (3) legacy top-level `status` for pre-c5c6139 senders. Lifecycle wins on either GET or PUT — a GET that returns a `delivered` event still classifies as `order_delivered`.
+
+**Webhook payload location:** For webhook paths, the order payload is in the **request** body (the response is typically an ack like `{"status": "ok"}`). The classifier and tracker use `request_body` for both classification and field extraction on webhook paths. Webhook 4xx/5xx responses classify as `error` rather than falling through to `order_webhook_received`.
 
 #### Identity (3)
 
 | HTTP Operation | Event Type | Trigger |
 |---|---|---|
-| `POST /identity` | `identity_link_initiated` | OAuth identity linking started |
-| `GET /identity/callback` | `identity_link_completed` | Identity callback confirmed |
-| `POST /identity/revoke` | `identity_link_revoked` | Identity link revoked |
+| `POST /identity`, `/oauth2/authorize` | `identity_link_initiated` | OAuth identity linking started |
+| `GET /identity/callback`, `/oauth2/token` | `identity_link_completed` | OAuth callback / token endpoint finalizes the link |
+| `POST /identity/revoke`, `/oauth2/revoke`, `DELETE /identity/*` | `identity_link_revoked` | Identity link revoked |
+
+OAuth metadata discovery endpoints — `/.well-known/oauth-authorization-server` (RFC 8414), `/.well-known/openid-configuration` (OIDC Discovery), and `/.well-known/oauth-protected-resource` (RFC 9728) — classify as `identity_link_initiated` since they're the first step of an identity-linking flow.
 
 #### Payment (4)
 
@@ -212,7 +232,7 @@ For MCP and A2A transports, `classify_jsonrpc()` maps tool names to event types 
 | `add_to_checkout`, `remove_from_checkout`, `update_customer_details` | `checkout_session_updated` |
 | `start_payment` | `checkout_session_updated` (pre-completion step) |
 | `create_cart`, `a2a.ucp.cart.create` | `cart_created` |
-| `get_order`, `a2a.ucp.order.get` | `order_updated` (refined by response body status) |
+| `get_order`, `a2a.ucp.order.get` | `order_get` (refined by lifecycle from the response body) |
 | `order_event_webhook` | *(by request body status)* |
 | `link_identity`, `a2a.ucp.identity.link` | `identity_link_initiated` |
 | `negotiate_capability`, `a2a.ucp.capability.negotiate` | `capability_negotiated` |
@@ -251,6 +271,19 @@ Each state transition generates a corresponding analytics event, enabling precis
 | `app_name` | STRING | Application name tag |
 | `merchant_host` | STRING | Business endpoint hostname |
 | `transport` | STRING | `rest` \| `mcp` \| `a2a` \| `embedded` |
+| `platform_profile_url` | STRING | Raw `UCP-Agent` header (legacy; superseded by `ucp_agent_profile_url`) |
+| `ucp_agent_profile_url` | STRING | `profile` member parsed out of the RFC 8941 `UCP-Agent` Structured Field Dictionary |
+
+### UCP Request-Body Context
+
+Captured from `body.context` on requests carrying a UCP Context object (e.g. checkout-create, catalog-search).
+
+| Column | Type | Description |
+|---|---|---|
+| `context_intent` | STRING | Buyer intent / agent task |
+| `context_language` | STRING | BCP 47 language tag |
+| `context_currency` | STRING | ISO 4217 currency code |
+| `context_eligibility_json` | JSON | Eligibility claim payload |
 
 ### UCP Checkout Fields
 
@@ -259,38 +292,120 @@ Each state transition generates a corresponding analytics event, enabling precis
 | `checkout_session_id` | STRING | UCP checkout session ID (cluster key) |
 | `checkout_status` | STRING | Current status in state machine |
 | `order_id` | STRING | Order ID created on completion |
+| `order_label` | STRING | Business-set human-readable order label (order-shaped bodies only) |
 | `currency` | STRING | ISO 4217 currency code |
-| `subtotal_amount` | INTEGER | Subtotal in minor units (cents) |
-| `items_discount_amount` | INTEGER | Item-level discount in minor units |
-| `tax_amount` | INTEGER | Tax in minor units |
-| `fulfillment_amount` | INTEGER | Fulfillment cost in minor units |
-| `discount_amount` | INTEGER | Discount in minor units |
-| `fee_amount` | INTEGER | Fee in minor units |
-| `total_amount` | INTEGER | Total in minor units |
+| `items_discount_amount` | INTEGER | SUM of `totals[type=items_discount].amount` |
+| `subtotal_amount` | INTEGER | SUM of `totals[type=subtotal].amount` |
+| `discount_amount` | INTEGER | SUM of `totals[type=discount].amount` |
+| `fulfillment_amount` | INTEGER | SUM of `totals[type=fulfillment].amount` |
+| `tax_amount` | INTEGER | SUM of `totals[type=tax].amount` (handles split state+local) |
+| `fee_amount` | INTEGER | SUM of `totals[type=fee].amount` |
+| `total_amount` | INTEGER | SUM of `totals[type=total].amount` |
+| `totals_json` | JSON | Full ordered `totals[]` verbatim (duplicates, `display_text`, `lines[]`, business-defined types) |
 | `line_item_count` | INTEGER | Number of items in checkout |
 | `line_items_json` | JSON | Full line items array |
 | `discount_codes_json` | JSON | Discount codes from discount extension |
 | `discount_applied_json` | JSON | Applied discounts from discount extension |
 | `expires_at` | STRING | Checkout session expiration timestamp |
-| `continue_url` | STRING | URL to continue checkout in browser |
+| `continue_url` | STRING | URL to continue checkout (captures `error_response.continue_url` too) |
 | `permalink_url` | STRING | Permanent link to the order |
+
+### Order Lifecycle (c5c6139 shape)
+
+| Column | Type | Description |
+|---|---|---|
+| `fulfillment_events_json` | JSON | Full `fulfillment.events[]` array verbatim |
+| `adjustments_json` | JSON | Full `adjustments[]` array verbatim |
+| `latest_fulfillment_event_type` | STRING | Type of the latest fulfillment event by RFC 3339 `occurred_at` |
+| `latest_fulfillment_event_at` | TIMESTAMP | `occurred_at` of the latest fulfillment event |
+| `latest_adjustment_type` | STRING | Type of the latest adjustment (refund / cancellation / etc.) |
+| `latest_adjustment_status` | STRING | `pending` / `completed` / `failed` |
+| `latest_adjustment_at` | TIMESTAMP | `occurred_at` of the latest adjustment |
+
+### HTTP Message Signing (RFC 9421 + UCP `signatures.md`)
+
+Three-state nullable BOOLs distinguish "headers never observed" (NULL) from "observed and unsigned" (FALSE).
+
+| Column | Type | Description |
+|---|---|---|
+| `request_signed` | BOOL | True iff request carries a complete `Signature-Input` + `Signature` pair |
+| `response_signed` | BOOL | Same on the response side |
+| `request_signature_keyid` | STRING | First `keyid` parsed from `Signature-Input` (captured even on half-signed for forensics) |
+| `response_signature_keyid` | STRING | Same on the response side |
+| `request_signature_alg` | STRING | JWA algorithm (`ES256` / `ES384`) derived from the matched JWK's `crv` via `jwk_lookup`; populated only when `request_signed=True` |
+| `response_signature_alg` | STRING | Same on the response side |
+
+### Webhook Metadata (Standard Webhooks)
+
+| Column | Type | Description |
+|---|---|---|
+| `webhook_id` | STRING | `Webhook-Id` request header (webhook-scoped) |
+| `webhook_timestamp` | TIMESTAMP | `Webhook-Timestamp` parsed from Unix seconds into ISO 8601 UTC |
+
+### WWW-Authenticate Bearer Challenge (RFC 7235 / 6750 / 9728)
+
+| Column | Type | Description |
+|---|---|---|
+| `auth_challenge_realm` | STRING | `realm` auth-param |
+| `auth_challenge_error` | STRING | `error` auth-param (`invalid_token` / `insufficient_scope` / ...) |
+| `auth_challenge_scope` | STRING | `scope` auth-param |
+| `auth_challenge_resource_metadata` | STRING | `resource_metadata` pointer per RFC 9728 |
+
+### Embedded Checkout (server-observable slice)
+
+| Column | Type | Description |
+|---|---|---|
+| `embedded_delegations_json` | JSON | Union of `delegate[]` across all embedded services in `/.well-known/ucp` |
+| `embedded_color_schemes_json` | JSON | Union of `color_scheme[]` across all embedded services |
+| `embedded_ec_color_scheme` | STRING | `ec_color_scheme` query parameter on the request URL / path |
+
+### AP2 Mandates + Buyer Consent
+
+Safe-by-default columns capture only non-PII metadata; the raw column is opt-in via `include_ap2_raw=True`.
+
+| Column | Type | Description |
+|---|---|---|
+| `ap2_mandate_present` | BOOL | Whether any AP2 mandate field is present on `body.ap2` |
+| `ap2_mandate_keys_json` | JSON | Names of present mandate fields |
+| `ap2_mandate_metadata_json` | JSON | JOSE header (`kid` / `alg` / `typ`) + SHA-256 hex of each credential string. Payload / disclosures **never** decoded. |
+| `buyer_consent_json` | JSON | `body.buyer.consent` filtered to the four documented boolean flags (analytics / preferences / marketing / sale_of_data). Never the parent buyer object's PII. |
+| `ap2_mandate_raw_json` | JSON | (Opt-in) original `body.ap2` after `_redact`; credential field names force-included in redaction |
+
+### Authorization Signals
+
+Safe-by-default columns capture only key names; the raw column is opt-in via `include_signals_raw=True`.
+
+| Column | Type | Description |
+|---|---|---|
+| `signals_present` | BOOL | Whether `body.signals` carries any entries |
+| `signals_keys_json` | JSON | Names of signal keys (never values, which may carry IP / UA / fingerprint data) |
+| `signals_json` | JSON | (Opt-in) original `body.signals` after `_redact`; `dev.ucp.buyer_ip` and `dev.ucp.user_agent` force-included in redaction |
 
 ### Payment, Capabilities, Fulfillment, & Errors
 
 | Column | Type | Description |
 |---|---|---|
-| `payment_handler_id` | STRING | Payment handler ID (google_pay, shop_pay, etc.) |
-| `payment_instrument_type` | STRING | card, wallet, bank_transfer, etc. |
-| `payment_brand` | STRING | Visa, Mastercard, etc. |
-| `ucp_version` | STRING | Protocol version from response envelope |
-| `capabilities_json` | JSON | Capabilities array from UCP envelope |
-| `extensions_json` | JSON | Extensions (capabilities with `extends` field) |
-| `fulfillment_type` | STRING | shipping, pickup, digital, etc. |
-| `fulfillment_destination_country` | STRING | ISO country code |
-| `error_code` | STRING | Error code from messages array |
-| `error_message` | STRING | Error content string |
-| `error_severity` | STRING | recoverable \| escalation \| fatal |
+| `payment_handler_id` | STRING | Payment handler ID (e.g. `com.stripe.payment`) |
+| `payment_instrument_type` | STRING | `card`, `wallet`, `bank_transfer`, etc. |
+| `payment_brand` | STRING | `Visa`, `Mastercard`, etc. |
+| `payment_available_instruments_json` | JSON | Per-handler `available_instruments[]` from `body.ucp.payment_handlers[*]` (preserved per-handler) |
+| `ucp_version` | STRING | Protocol version from `ucp` envelope |
+| `capabilities_json` | JSON | Capabilities array from `ucp.capabilities` |
+| `extensions_json` | JSON | Extensions metadata |
+| `fulfillment_type` | STRING | `shipping`, `pickup`, `digital`, etc. |
+| `fulfillment_destination_country` | STRING | ISO 3166-1 alpha-2 country code |
+| `error_code` | STRING | First error's `code` from `messages[]` |
+| `error_message` | STRING | First error's `content` |
+| `error_severity` | STRING | First error's `severity` |
+| `messages_json` | JSON | Full `messages[]` array verbatim |
+| `message_info_codes_json` | JSON | Dedup'd, order-preserved list of info-severity codes |
+| `message_warning_codes_json` | JSON | Dedup'd, order-preserved list of warning-severity codes |
+| `identity_optional_present` | BOOL | Three-state convenience flag — TRUE when `identity_optional` is in info codes, FALSE when info codes are observed but it isn't, NULL when no info codes |
+| `eligibility_accepted_present` | BOOL | Three-state outcome flag — denominator is "any eligibility outcome code observed" |
+| `eligibility_not_accepted_present` | BOOL | Same denominator |
+| `eligibility_invalid_present` | BOOL | Same denominator (cross-severity capture; `eligibility_invalid` is canonically error) |
 | `latency_ms` | FLOAT | Request-to-response latency in milliseconds |
+| `custom_metadata_json` | JSON | User-defined static key-value metadata on every event |
 
 ---
 
@@ -300,18 +415,50 @@ Each state transition generates a corresponding analytics event, enabling precis
 
 `UCPResponseParser.extract()` understands the UCP checkout object schema:
 
-- **Totals array parsing:** UCP represents financial data as a typed `totals` array. Each entry has `type` and `amount` in minor units. The parser handles all 7 spec-defined total types: `items_discount`, `subtotal`, `discount`, `fulfillment`, `tax`, `fee`, and `total`. These map to individual BigQuery columns (e.g. `fulfillment_amount`, `fee_amount`, `items_discount_amount`).
-- **Payment extraction:** The SDK `PaymentResponse` contains both `handlers[]` (merchant payment handler configs) and `instruments[]` (buyer payment methods). Instruments are preferred for analytics since they carry `handler_id`, `type`, and `brand`. Also handles `payment_data` from completion requests and discovery-level `payment.handlers` (top-level sibling of `ucp` envelope). Extracts handler_id, instrument type, and brand — never captures credentials/tokens.
-- **Capability detection:** Extracts the UCP metadata envelope (`ucp.version`, `ucp.capabilities`). Per the Python SDK and samples, capabilities are arrays of objects with a `name` field (e.g., `[{"name": "dev.ucp.shopping.checkout", "version": "2026-01-11"}]`). For robustness, also handles an object-keyed format where capability names are dict keys. Discovery responses place `payment.handlers` at the top level as a sibling of `ucp`, not nested inside it.
-- **Discount extension:** Extracts `discounts.codes` and `discounts.applied` into `discount_codes_json` and `discount_applied_json` BigQuery columns.
-- **Checkout metadata:** Extracts `expires_at` and `continue_url` from the checkout session.
-- **Order model:** Extracts `checkout.order` as a nested object (not flat `order_id`), including `permalink_url` and fulfillment `expectations[]`/`events[]`.
+- **Totals array parsing:** UCP represents financial data as a typed `totals` array. Each entry has `type` and `amount` in minor units. The parser handles all 7 spec-defined well-known total types — `items_discount`, `subtotal`, `discount`, `fulfillment`, `tax`, `fee`, `total` — and SUM-aggregates over duplicate entries of the same type (split state+local tax, multi-line discount). `total.json` is an open vocabulary; business-defined types are dropped from the scalar columns but preserved verbatim in `totals_json` JSON. Amounts are signed integers per `signed_amount.json` (negative for refunds); non-int values (string / float / bool) are dropped from SUM but preserved in `totals_json` for signal fidelity.
+- **Payment extraction:** The SDK `PaymentResponse` contains both `handlers[]` (merchant payment handler configs) and `instruments[]` (buyer payment methods). Instruments are preferred for analytics since they carry `handler_id`, `type`, and `brand`. Discovery responses additionally surface `payment_available_instruments_json` from `body.ucp.payment_handlers[*].available_instruments` (per-handler arrays preserved intact). Extracts handler_id, instrument type, and brand — never captures credentials/tokens.
+- **Capability detection:** Extracts the UCP metadata envelope (`ucp.version`, `ucp.capabilities`). Per the Python SDK and samples, capabilities are arrays of objects with a `name` field (e.g., `[{"name": "dev.ucp.shopping.checkout", "version": "2026-01-11"}]`). For robustness, also handles an object-keyed format where capability names are dict keys.
+- **Embedded transport config:** Walks `ucp.services[*]` for `transport: embedded` entries; unions `delegate[]` and `color_scheme[]` across all embedded services into `embedded_delegations_json` and `embedded_color_schemes_json`.
+- **Discount extension:** Extracts `discounts.codes` and `discounts.applied` into `discount_codes_json` and `discount_applied_json` columns.
+- **Order lifecycle (c5c6139):** `order.json` no longer carries a top-level `status`. Lifecycle derivation walks (1) `fulfillment.events[]` and (2) `adjustments[]`, picking the entry with the latest RFC 3339 `occurred_at` via aware datetime parsing (mixed `Z` / `±HH:MM` offsets compared as instants, not lexicographically; naive timestamps treated as invalid). Falls back to legacy top-level `status` for pre-c5c6139 senders. Surfaces full arrays plus `latest_*_type` / `latest_*_at` / `latest_adjustment_status` scalars.
+- **Checkout metadata:** Extracts `expires_at` and `continue_url` (the same column captures `error_response.continue_url` per `error_response.json`).
+- **Order model:** Extracts `checkout.order` as a nested object (not flat `order_id`), including `permalink_url`. The optional business-set `order.label` (PR #326 upstream) surfaces only on order-shaped bodies (those carrying `checkout_id`) so a stray `label` on a checkout body doesn't misattribute.
 - **Session-order correlation:** Distinguishes checkout sessions from orders by checking for `checkout_id` (present on orders, absent on checkouts).
-- **Checkout status scoping:** The `checkout_status` field is only populated for actual checkout responses, not order or cart responses. This uses two guards: (1) bodies with `checkout_id` are orders (skipped), and (2) the status value must be a known checkout status (`incomplete`, `requires_escalation`, `ready_for_complete`, `complete_in_progress`, `completed`, `canceled`). This prevents order statuses like `shipped` or `delivered` from polluting `checkout_status`.
+- **Checkout status scoping:** The `checkout_status` field is only populated for actual checkout responses, not order or cart responses. This uses two guards: (1) bodies with `checkout_id` are orders (skipped), and (2) the status value must be a known checkout status (`incomplete`, `requires_escalation`, `ready_for_complete`, `complete_in_progress`, `completed`, `canceled`).
+- **Messages:** Single pass over `messages[]` captures the first error (legacy `error_code`/`error_message`/`error_severity`) plus dedup'd, order-preserved per-severity code lists. Three-state nullable convenience flags derive from `messages[].code`: `identity_optional_present` (info-severity), `eligibility_accepted_present` / `eligibility_not_accepted_present` / `eligibility_invalid_present` (cross-severity capture — `eligibility_invalid` is canonically error).
 
 ### 6.2 PII Redaction
 
-Optional PII redaction recursively walks JSON bodies, replacing configured fields (`email`, `phone`, `first_name`, `last_name`, `street_address`, `postal_code`) with `[REDACTED]`. Preserves analytics structure while preventing PII from reaching BigQuery.
+`UCPAnalyticsTracker._redact` recursively walks JSON bodies, replacing configured fields with `[REDACTED]` when `key.lower() in self.pii_fields`. Defaults: `email`, `phone`, `first_name`, `last_name`, `phone_number`, `street_address`, `postal_code`. The `pii_fields` constructor parameter **replaces** the defaults wholesale (it is not additive) — operators who want to keep the documented PII names should include them in their custom list. The force-included keys below are OR'd in regardless.
+
+The redaction set has four documented PII keys **force-included** regardless of operator config so a custom `pii_fields` list cannot accidentally disable safety:
+
+- `merchant_authorization` and `checkout_mandate` — AP2 cryptographic credentials (detached JWS / SD-JWT+kb).
+- `dev.ucp.buyer_ip` and `dev.ucp.user_agent` — documented PII signal keys per `signals.json`.
+
+Non-string dict keys (int / None / tuple) are handled gracefully — they can't match `pii_fields` (which holds strings) but recursion still walks the value side, so nested string-keyed PII under a non-string key is still caught.
+
+### 6.3 Header-Aware Helpers (`_headers.py`)
+
+Shared header utilities live in `_headers.py` (no Starlette dependency, so the HTTPX hook can use them):
+
+- `is_signed(headers)` — true iff both `Signature-Input` and `Signature` are present (UCP `signatures.md` half-signed protection).
+- `signature_keyid(headers)` — first `keyid` parsed from `Signature-Input` (captured even on half-signed for forensics).
+- `signature_alg_from_jwk(jwk)` — JWA name (`ES256` / `ES384`) derived from JWK `crv` per UCP `signatures.md`. No fallback to JWK `alg` field on unknown curves — future curves must be explicit additions to the mapping.
+- `decode_jose_header(credential)` — decodes ONLY the first dot-separated segment of a JWS / JWT / SD-JWT credential. Restores stripped base64url padding. Never decodes payload or disclosures.
+- `credential_sha256(credential)` — opaque hex hash for correlation across rows without persisting the credential itself.
+- `parse_bearer_challenge(headers)` — RFC 7235-faithful `WWW-Authenticate` Bearer challenge parser. Handles multi-challenge isolation, multi-line transport preservation, BWS around `=`, token-form values (`error=invalid_token`), and hyphenated scheme names. `_SCHEME_TOKEN_RE` and `_AUTH_PARAM_RE` use RFC 7230 `tchar+` syntax.
+- `ucp_agent_profile_url(headers)` — parses the `profile` member from the RFC 8941 `UCP-Agent` Structured Field Dictionary. Anchored on `,` member boundaries (not `;` parameter boundaries) so attacker-controlled parameter values can't smuggle in.
+- `webhook_id(headers)` / `webhook_timestamp_iso(headers)` — Standard Webhooks metadata; the latter parses Unix seconds → ISO 8601 UTC string.
+
+### 6.4 Webhook Detection (`_path_match.py`)
+
+`is_webhook_delivery(path, request_headers, extra_prefixes)` is the single source of truth across the classifier, middleware, HTTPX hook, and tracker `is_webhook` gate. Two acceptance branches:
+
+1. Path matches one of the default `/webhook(s)` prefixes or any operator-configured `webhook_path_prefixes` (UCP `order.md`: *"The URL format is platform-specific"*).
+2. Standard Webhooks `Webhook-Id` + `Webhook-Timestamp` header pair is present on the request.
+
+Header-based detection is **suppressed** on known non-webhook UCP REST paths (`/checkout-sessions`, `/carts`, `/catalog`, `/orders`, `/identity`, `/oauth2`, `/.well-known/*`, testing/simulate paths) so a buggy or malicious sender stamping webhook headers on `/checkout-sessions` can't trick the classifier.
 
 ---
 
@@ -395,14 +542,14 @@ Eight runnable examples are included (see [`examples/README.md`](../examples/REA
 | `order_lifecycle_demo.py` | Yes | REST | Order delivered/returned/canceled (8 types) |
 | `transport_demo.py` | Yes | REST/MCP/A2A | All 3 transports compared (5 types) |
 | `identity_payment_demo.py` | Yes | REST | Identity linking + payment flows (10 types) |
-| `bq_demo.py` | Yes | REST/MCP/A2A | All 27 event types, 3 transports, BQ verification |
-| `bq_adk_demo.py` | Yes | ADK/MCP/A2A | All 27 event types via ADK plugin, BQ verification |
+| `bq_demo.py` | Yes | REST/MCP/A2A | Every event type, 3 transports, BQ verification |
+| `bq_adk_demo.py` | Yes | ADK/MCP/A2A | Every event type via ADK plugin, BQ verification |
 
 Shared BigQuery configuration (`PROJECT_ID`, `DATASET_ID`, `TABLE_ID`) lives in `examples/_demo_utils.py` and reads from the `GCP_PROJECT_ID` environment variable.
 
 **Local demo (no GCP):** `e2e_demo.py` starts a mini UCP merchant server (FastAPI, port 8199) with a flower shop catalog, runs a shopping agent through the full happy path (discovery → checkout → payment → shipment), writes 6 events to local SQLite, and prints an analytics report.
 
-**Comprehensive demos:** `bq_demo.py` and `bq_adk_demo.py` each exercise all 27 event types across REST, MCP, and A2A transports, then query BigQuery to verify all events landed correctly.
+**Comprehensive demos:** `bq_demo.py` and `bq_adk_demo.py` each exercise every event type across REST, MCP, and A2A transports, then query BigQuery to verify all events landed correctly. (`src/ucp_analytics/events.py::UCPEventType` is the canonical list — the demos enumerate it directly rather than hard-coding a count, so coverage stays in sync as new event types land.)
 
 ---
 
@@ -418,8 +565,13 @@ Shared BigQuery configuration (`PROJECT_ID`, `DATASET_ID`, `TABLE_ID`) lives in 
 | `app_name` | `""` | Tags every event for multi-app filtering |
 | `batch_size` | `50` | Events buffered before flush |
 | `auto_create_table` | `True` | Create dataset/table on first write |
-| `redact_pii` | `False` | Redact email, phone, address fields |
+| `redact_pii` | `False` | Recursively redact configured PII fields in bodies before extraction |
+| `pii_fields` | (defaults) | **Override** (not extend) the default redaction set. Passing a list replaces the defaults (`email`, `phone`, `first_name`, `last_name`, `phone_number`, `street_address`, `postal_code`) wholesale — include them in your own list to preserve them. The force-included keys (AP2 credentials, documented PII signals) are always OR'd in afterward regardless of operator config. |
 | `custom_metadata` | `None` | Dict attached as JSON to every event |
+| `webhook_path_prefixes` | `()` | Additional path prefixes the operator's platform publishes for order webhooks (UCP `order.md`: "The URL format is platform-specific") |
+| `jwk_lookup` | `None` | Callable `(keyid: str) -> Optional[Mapping]` used to derive `request_signature_alg` / `response_signature_alg` from JWK `crv` |
+| `include_ap2_raw` | `False` | Surface the raw `body.ap2` object into `ap2_mandate_raw_json` after redaction (default-off forensic capture) |
+| `include_signals_raw` | `False` | Surface the raw `body.signals` object into `signals_json` after redaction (default-off forensic capture) |
 
 The underlying `AsyncBigQueryWriter` also accepts:
 
@@ -453,4 +605,5 @@ The two plugins are complementary: BQ Agent Analytics provides general agent obs
 - **Cost attribution:** Correlate LLM token costs (from ADK plugin) with revenue per checkout session
 - **Conformance testing integration:** Validate captured events against UCP conformance test expectations
 - **Multi-merchant aggregation:** Cross-merchant funnel analysis for platform operators
+- **Embedded Checkout runtime events:** Currently deferred — `ec.totals.change`, link delegation acceptance, reauth, cart binding, and ECP per-shape error variants live in the iframe / host browser as postMessage events. A future slice would add a host-side instrumentation surface (browser SDK + ingest endpoint) so those events can land in the same BigQuery table.
 - **Looker Studio template:** Pre-built dashboard deployable via Terraform

@@ -1,7 +1,7 @@
 # UCP Analytics — Examples
 
 This directory contains runnable examples that demonstrate UCP Analytics
-covering all 27 UCP event types across checkout, cart, order, identity,
+covering every UCP event type across checkout, cart, order, identity,
 payment, and transport scenarios.
 
 ## Overview
@@ -14,8 +14,8 @@ payment, and transport scenarios.
 | [`order_lifecycle_demo.py`](#order-lifecycle-demo) | Yes (BigQuery) | REST | Order delivered/returned/canceled (8 types) |
 | [`transport_demo.py`](#transport-demo) | Yes (BigQuery) | REST/MCP/A2A | All 3 transports compared (5 types) |
 | [`identity_payment_demo.py`](#identity--payment-demo) | Yes (BigQuery) | REST | Identity linking + payment flows (10 types) |
-| [`bq_demo.py`](#bigquery-demo) | Yes | REST/MCP/A2A | Comprehensive demo — all 27 event types, 3 transports, SDK models, BQ verification |
-| [`bq_adk_demo.py`](#adk-bigquery-demo) | Yes | ADK/MCP/A2A | Comprehensive ADK demo — all 27 event types, 3 transports, SDK models, BQ verification |
+| [`bq_demo.py`](#bigquery-demo) | Yes | REST/MCP/A2A | Comprehensive demo — every event type, 3 transports, SDK models, BQ verification |
+| [`bq_adk_demo.py`](#adk-bigquery-demo) | Yes | ADK/MCP/A2A | Comprehensive ADK demo — every event type, 3 transports, SDK models, BQ verification |
 
 ### Quick Start (No GCP)
 
@@ -69,7 +69,7 @@ uv run python examples/identity_payment_demo.py  # identity + payment
 
 ## BigQuery Demo
 
-**`bq_demo.py`** — Comprehensive demo covering all 27 UCP event types across
+**`bq_demo.py`** — Comprehensive demo covering every UCP event type across
 3 transports (REST, MCP, A2A) with UCP SDK models and BigQuery verification.
 
 ### What It Does
@@ -78,13 +78,13 @@ Spins up a mini UCP merchant server with all endpoints (checkout, cart, order,
 identity, payment, capabilities) and a shopping agent client. Both sides are
 instrumented with analytics. The demo runs in three phases:
 
-1. **REST transport** — exercises all 27 event types via HTTP (discovery, checkout
+1. **REST transport** — exercises every event type via HTTP (discovery, checkout
    lifecycle, cart lifecycle, order lifecycle, identity linking, payment events,
    capability negotiation, error/fallback)
 2. **MCP transport** — replays key operations via `record_jsonrpc(transport="mcp")`
 3. **A2A transport** — replays key operations via `record_jsonrpc(transport="a2a")`
 
-After all phases, BigQuery is queried to verify all 27 event types are present
+After all phases, BigQuery is queried to verify every event type are present
 across all 3 transports.
 
 ### Run
@@ -108,7 +108,7 @@ ORDER BY event_type, transport;
 
 ## ADK BigQuery Demo
 
-**`bq_adk_demo.py`** — Comprehensive ADK demo covering all 27 UCP event types
+**`bq_adk_demo.py`** — Comprehensive ADK demo covering every UCP event type
 across 3 transports (REST/ADK, MCP, A2A) with UCP SDK models and BigQuery
 verification.
 
@@ -117,16 +117,17 @@ verification.
 Uses `UCPAgentAnalyticsPlugin` for tool-based events and a separate
 `UCPAnalyticsTracker` for events the plugin can't classify. Runs in five phases:
 
-1. **Plugin tool calls** — 17 event types via `simulate_tool_call()` (discovery,
-   checkout lifecycle including escalation, cart lifecycle, order lifecycle
-   through all terminal states)
+1. **Plugin tool calls** — 22 event types via `simulate_tool_call()` (discovery,
+   catalog search/lookup/product, checkout lifecycle including escalation, cart
+   lifecycle, order lifecycle through all terminal states + REST update +
+   webhook receipt)
 2. **Direct tracker events** — 10 event types the plugin can't handle (identity
    linking, payment flows, capability negotiation, error, request)
 3. **MCP transport** — replays key operations via `record_jsonrpc(transport="mcp")`
 4. **A2A transport** — replays key operations via `record_jsonrpc(transport="a2a")`
 5. **Non-UCP tool** — verifies `get_weather` is correctly skipped
 
-After all phases, BigQuery is queried to verify all 27 event types are present.
+After all phases, BigQuery is queried to verify every event type are present.
 
 ### Run
 
@@ -208,8 +209,8 @@ uv run python examples/order_lifecycle_demo.py
 3. **Return** — shipped -> delivered -> returned
 4. **Fulfillment variants** — shipping, pickup, digital
 
-**Event types:** `order_created`, `order_updated`, `order_shipped`,
-`order_delivered`, `order_returned`, `order_canceled`
+**Event types:** `order_created`, `order_get`, `order_shipped`,
+`order_delivered`, `order_returned`, `order_canceled`, `order_webhook_received`
 
 ---
 
