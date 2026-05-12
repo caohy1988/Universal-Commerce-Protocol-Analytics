@@ -358,14 +358,14 @@ async def simulate_tool_call(
 
 
 # ==========================================================================
-# Phase 1: Plugin-based tool calls (17 event types via _TOOL_TO_HTTP)
+# Phase 1: Plugin-based tool calls (22 event types via _TOOL_TO_HTTP)
 # ==========================================================================
 
 
 async def run_plugin_phase(plugin: UCPAgentAnalyticsPlugin):
     """Run all plugin-classifiable tool calls."""
     print("\n" + "=" * 70)
-    print("  PHASE 1: ADK Plugin Tool Calls (17 event types)")
+    print("  PHASE 1: ADK Plugin Tool Calls (22 event types)")
     print("=" * 70)
 
     steps = [
@@ -763,7 +763,7 @@ async def verify_bigquery():
     from google.cloud import bigquery
 
     print("\n" + "=" * 70)
-    print("  BIGQUERY VERIFICATION — All 27 Event Types")
+    print("  BIGQUERY VERIFICATION — Every Event Type")
     print("=" * 70)
 
     client = bigquery.Client(project=PROJECT_ID)
@@ -896,7 +896,7 @@ async def main():
         auto_create_table=True,
     )
 
-    # Phase 1: Plugin-based tool calls (17 event types)
+    # Phase 1: Plugin-based tool calls (22 event types)
     await run_plugin_phase(plugin)
 
     # Phase 2: Direct tracker events (10 event types)

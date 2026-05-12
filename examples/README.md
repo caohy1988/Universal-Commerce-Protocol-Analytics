@@ -117,9 +117,10 @@ verification.
 Uses `UCPAgentAnalyticsPlugin` for tool-based events and a separate
 `UCPAnalyticsTracker` for events the plugin can't classify. Runs in five phases:
 
-1. **Plugin tool calls** — 17 event types via `simulate_tool_call()` (discovery,
-   checkout lifecycle including escalation, cart lifecycle, order lifecycle
-   through all terminal states)
+1. **Plugin tool calls** — 22 event types via `simulate_tool_call()` (discovery,
+   catalog search/lookup/product, checkout lifecycle including escalation, cart
+   lifecycle, order lifecycle through all terminal states + REST update +
+   webhook receipt)
 2. **Direct tracker events** — 10 event types the plugin can't handle (identity
    linking, payment flows, capability negotiation, error, request)
 3. **MCP transport** — replays key operations via `record_jsonrpc(transport="mcp")`

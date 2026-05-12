@@ -1134,7 +1134,7 @@ async def verify_bigquery(session_id: str):
     from google.cloud import bigquery
 
     print("\n" + "=" * 70)
-    print("  BIGQUERY VERIFICATION — All 27 Event Types")
+    print("  BIGQUERY VERIFICATION — Every Event Type")
     print("=" * 70)
 
     client = bigquery.Client(project=PROJECT_ID)

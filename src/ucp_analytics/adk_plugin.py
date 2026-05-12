@@ -73,9 +73,11 @@ class UCPAgentAnalyticsPlugin(BasePlugin):  # type: ignore[misc]
         # `simulate_shipping` is a UCP samples-server testing endpoint
         # (see `/testing/simulate-shipping/{id}` in `examples/bq_demo.py`).
         # The `_TOOL_TO_HTTP` map below already routes it, but it needs
-        # a pattern match so `_is_ucp_tool` returns True and the
-        # ADK callback records the event.
-        "simulate",
+        # a pattern match so `_is_ucp_tool` returns True and the ADK
+        # callback records the event. Match the exact tool name (NOT a
+        # bare "simulate" substring) so unrelated agent tools like
+        # `simulate_weather` don't get pulled in as UCP traffic.
+        "simulate_shipping",
     ]
 
     # Map ADK tool names → (HTTP method, path) for accurate event classification.
