@@ -2957,6 +2957,117 @@ class TestBuyerConsentExtraction:
         assert "nested@example.com" not in json.dumps(fields)
 
 
+class TestSignalsSafeDefaultExtraction:
+    """A6 — Authorization & abuse signals. The signals dict is open
+    (`additionalProperties: true`) with reverse-domain key naming.
+    Safe-default extraction captures presence + key names only;
+    values are NEVER persisted in these columns. Raw capture is
+    gated on the tracker's `include_signals_raw` flag and lives in
+    test_tracker.py."""
+
+    def test_present_and_keys_extracted(self):
+        body = {
+            "signals": {
+                "dev.ucp.buyer_ip": "192.0.2.1",
+                "dev.ucp.user_agent": "Mozilla/5.0 (privacy-sensitive)",
+            }
+        }
+        fields = UCPResponseParser.extract(body)
+        assert fields["signals_present"] is True
+        keys = json.loads(fields["signals_keys_json"])
+        assert keys == ["dev.ucp.buyer_ip", "dev.ucp.user_agent"]
+        # CRITICAL: values must NEVER appear in safe-default fields.
+        serialized = json.dumps(fields)
+        assert "192.0.2.1" not in serialized
+        assert "Mozilla/5.0" not in serialized
+        assert "privacy-sensitive" not in serialized
+
+    def test_operator_extended_signal_keys_recorded(self):
+        """`additionalProperties: true` — operators can ship custom
+        signals using reverse-domain keys. The key names are
+        observability (which signals were sent); the values stay
+        out of safe defaults."""
+        body = {
+            "signals": {
+                "dev.ucp.buyer_ip": "10.0.0.1",
+                "dev.merchant.session_token": "secret-token",
+                "dev.merchant.device_fingerprint": "fp-abc-123",
+            }
+        }
+        fields = UCPResponseParser.extract(body)
+        keys = json.loads(fields["signals_keys_json"])
+        # All three keys present in order.
+        assert keys == [
+            "dev.ucp.buyer_ip",
+            "dev.merchant.session_token",
+            "dev.merchant.device_fingerprint",
+        ]
+        # No values leak.
+        serialized = json.dumps(fields)
+        assert "10.0.0.1" not in serialized
+        assert "secret-token" not in serialized
+        assert "fp-abc-123" not in serialized
+
+    def test_no_signals_field_columns_absent(self):
+        body = {"id": "chk_123"}
+        fields = UCPResponseParser.extract(body)
+        assert "signals_present" not in fields
+        assert "signals_keys_json" not in fields
+
+    def test_empty_signals_dict_columns_absent(self):
+        """Three-state semantics: explicit empty dict → NULL,
+        not `{present: True, keys: []}`. Distinct from "signals
+        observed but empty"."""
+        body = {"signals": {}}
+        fields = UCPResponseParser.extract(body)
+        assert "signals_present" not in fields
+        assert "signals_keys_json" not in fields
+
+    def test_non_dict_signals_skipped(self):
+        body = {"signals": "not-a-dict"}
+        fields = UCPResponseParser.extract(body)
+        assert "signals_present" not in fields
+
+    def test_non_string_keys_dropped_from_keys_list(self):
+        """A malformed sender that ships integer/None keys (Python
+        would accept these in a dict, but the spec is reverse-domain
+        strings) gets those entries dropped from the keys list.
+        Presence flag still True so we don't lose visibility of the
+        delivery."""
+        body = {
+            "signals": {
+                "dev.ucp.buyer_ip": "192.0.2.1",
+                42: "non-string-key",
+            }
+        }
+        fields = UCPResponseParser.extract(body)
+        assert fields["signals_present"] is True
+        keys = json.loads(fields["signals_keys_json"])
+        # Only the well-formed key survives.
+        assert keys == ["dev.ucp.buyer_ip"]
+
+    def test_signal_with_complex_value_does_not_leak(self):
+        """A signal value might be a dict / list / nested structure
+        (e.g. a fingerprint blob). Safe-default columns only carry
+        the key name — the value is never serialized."""
+        body = {
+            "signals": {
+                "dev.merchant.fingerprint": {
+                    "canvas_hash": "abc123",
+                    "webgl_renderer": "RTX-secret",
+                    "ip_addresses": ["10.0.0.1"],
+                }
+            }
+        }
+        fields = UCPResponseParser.extract(body)
+        keys = json.loads(fields["signals_keys_json"])
+        assert keys == ["dev.merchant.fingerprint"]
+        serialized = json.dumps(fields)
+        assert "abc123" not in serialized
+        assert "RTX-secret" not in serialized
+        assert "10.0.0.1" not in serialized
+
+
 class TestCheckoutStatusScoping:
     """Tests that checkout_status is only set for checkout responses."""
 

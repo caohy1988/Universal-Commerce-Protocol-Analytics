@@ -167,6 +167,13 @@ class TestGetDDL:
         assert "eligibility_not_accepted_present BOOL" in ddl
         assert "eligibility_invalid_present BOOL" in ddl
 
+    def test_signals_columns_present(self):
+        """A6 — pin all three signals columns in the DDL."""
+        ddl = get_ddl("p", "d", "t")
+        assert "signals_present BOOL" in ddl
+        assert "signals_keys_json JSON" in ddl
+        assert "signals_json JSON" in ddl
+
     def test_ap2_mandate_columns_present(self):
         """A4 — pin all five AP2 columns. Missing one would silently
         drop the corresponding KPI on table creation."""

@@ -166,6 +166,31 @@ class UCPEvent:
     buyer_consent_json: Optional[str] = None
     ap2_mandate_raw_json: Optional[str] = None
 
+    # --- A6: Authorization & abuse signals ---
+    # `signals.json` at c5c6139 declares a `body.signals` dict keyed
+    # by reverse-domain names with `additionalProperties: true`.
+    # Known PII signals: `dev.ucp.buyer_ip` (IP address) and
+    # `dev.ucp.user_agent` (user-agent string). Operators can ship
+    # additional reverse-domain keys for merchant-specific signals.
+    #
+    # Safe-by-default columns capture only non-PII facts:
+    #   * `signals_present` -- whether any signals are present
+    #   * `signals_keys_json` -- the NAMES of signal keys (never
+    #     the values, which may carry IP / user-agent / fingerprint
+    #     data)
+    #
+    # Opt-in raw column (only when tracker `include_signals_raw=True`):
+    #   * `signals_json` -- original `body.signals` passed through
+    #     `_redact`. The known PII signal field names are
+    #     force-included in pii_fields so their values are scrubbed
+    #     regardless of `redact_pii` setting or operator-provided
+    #     pii_fields lists. Operators can extend the redaction set
+    #     with additional reverse-domain keys via the existing
+    #     pii_fields constructor parameter.
+    signals_present: Optional[bool] = None
+    signals_keys_json: Optional[str] = None
+    signals_json: Optional[str] = None
+
     # --- HTTP ---
     http_method: str = ""
     http_path: str = ""

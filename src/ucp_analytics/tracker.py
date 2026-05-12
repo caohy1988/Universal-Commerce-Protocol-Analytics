@@ -73,6 +73,7 @@ class UCPAnalyticsTracker:
         webhook_path_prefixes: Optional[List[str]] = None,
         jwk_lookup: Optional[Callable[[str], Optional[Mapping[str, Any]]]] = None,
         include_ap2_raw: bool = False,
+        include_signals_raw: bool = False,
     ):
         self.app_name = app_name
         self.redact_pii = redact_pii
@@ -97,6 +98,14 @@ class UCPAnalyticsTracker:
         # pii_fields list can extend the redaction set but cannot
         # accidentally turn this safety off.
         self.pii_fields |= {"merchant_authorization", "checkout_mandate"}
+        # A6: force-include known PII signal keys in the redaction
+        # set. `dev.ucp.buyer_ip` (IP address) and
+        # `dev.ucp.user_agent` (UA string) are documented PII
+        # carriers per `signals.json` at c5c6139. Operators can
+        # extend pii_fields with additional reverse-domain signal
+        # keys for merchant-specific signals; the spec's defaults
+        # are always redacted regardless of operator config.
+        self.pii_fields |= {"dev.ucp.buyer_ip", "dev.ucp.user_agent"}
         # A4: include_ap2_raw=True surfaces the raw `body.ap2` object
         # into the `ap2_mandate_raw_json` column AFTER passing through
         # _redact (so credential strings are scrubbed). Disabled by
@@ -105,6 +114,13 @@ class UCPAnalyticsTracker:
         # operators who need to forensically inspect mandate
         # structure.
         self.include_ap2_raw = include_ap2_raw
+        # A6: include_signals_raw=True surfaces the raw `body.signals`
+        # object into the `signals_json` column AFTER `_redact` so PII
+        # signal values are scrubbed. Same pattern as include_ap2_raw:
+        # disabled by default; safe-default columns
+        # (`signals_present`, `signals_keys_json`) carry the
+        # non-PII signal for everyone.
+        self.include_signals_raw = include_signals_raw
         self.custom_metadata = custom_metadata
         # UCP order.md: "The URL format is platform-specific." The
         # default `/webhook(s)` prefix lives inside is_webhook_delivery;
@@ -370,12 +386,38 @@ class UCPAnalyticsTracker:
             # are scrubbed before serializing. The capture is gated
             # on `include_ap2_raw` only; operators who want forensic
             # mandate inspection opt in, everyone else gets NULL.
+            #
+            # Filter to string keys before json.dumps: JSON object
+            # keys must be strings, and tuple / object keys would
+            # raise TypeError. Matches the parser safe-path behavior
+            # which also drops non-string keys.
             if self.include_ap2_raw:
                 ap2_obj = body.get("ap2")
                 if isinstance(ap2_obj, dict):
-                    event.ap2_mandate_raw_json = json.dumps(
-                        self._redact(ap2_obj), default=str
-                    )
+                    clean_ap2 = {k: v for k, v in ap2_obj.items() if isinstance(k, str)}
+                    if clean_ap2:
+                        event.ap2_mandate_raw_json = json.dumps(
+                            self._redact(clean_ap2), default=str
+                        )
+
+            # A6: opt-in raw signals capture. Same pattern as AP2.
+            # pii_fields includes `dev.ucp.buyer_ip` and
+            # `dev.ucp.user_agent` by construction so values for the
+            # documented PII signals are scrubbed; operators who
+            # ship additional reverse-domain PII signals can extend
+            # via the `pii_fields` constructor parameter. Non-string
+            # keys are filtered for the same JSON-serialization
+            # reason as AP2.
+            if self.include_signals_raw:
+                signals_obj = body.get("signals")
+                if isinstance(signals_obj, dict):
+                    clean_signals = {
+                        k: v for k, v in signals_obj.items() if isinstance(k, str)
+                    }
+                    if clean_signals:
+                        event.signals_json = json.dumps(
+                            self._redact(clean_signals), default=str
+                        )
 
             if self.redact_pii:
                 body = self._redact(body)
@@ -504,8 +546,19 @@ class UCPAnalyticsTracker:
 
     def _redact(self, data: Any) -> Any:
         if isinstance(data, dict):
+            # Non-string keys can appear in malformed senders' payloads
+            # (e.g. int / None / tuple keys); they can't match
+            # `pii_fields` (which holds strings) and `.lower()` would
+            # raise AttributeError on them. Guard with isinstance —
+            # non-string keys keep their value unchanged but the value
+            # is still walked recursively in case it contains nested
+            # PII keys.
             return {
-                k: "[REDACTED]" if k.lower() in self.pii_fields else self._redact(v)
+                k: (
+                    "[REDACTED]"
+                    if isinstance(k, str) and k.lower() in self.pii_fields
+                    else self._redact(v)
+                )
                 for k, v in data.items()
             }
         if isinstance(data, list):
