@@ -72,6 +72,7 @@ class UCPAnalyticsTracker:
         custom_metadata: Optional[Dict[str, str]] = None,
         webhook_path_prefixes: Optional[List[str]] = None,
         jwk_lookup: Optional[Callable[[str], Optional[Mapping[str, Any]]]] = None,
+        include_ap2_raw: bool = False,
     ):
         self.app_name = app_name
         self.redact_pii = redact_pii
@@ -87,6 +88,23 @@ class UCPAnalyticsTracker:
                 "postal_code",
             ]
         )
+        # A4: force-include AP2 credential field names in the
+        # redaction set. These are cryptographic credentials
+        # (detached JWS / SD-JWT+kb) that carry signed claims about
+        # the buyer / merchant; they must never land in analytics
+        # verbatim, even when `include_ap2_raw=True`. We OR these in
+        # regardless of operator-provided pii_fields so a custom
+        # pii_fields list can extend the redaction set but cannot
+        # accidentally turn this safety off.
+        self.pii_fields |= {"merchant_authorization", "checkout_mandate"}
+        # A4: include_ap2_raw=True surfaces the raw `body.ap2` object
+        # into the `ap2_mandate_raw_json` column AFTER passing through
+        # _redact (so credential strings are scrubbed). Disabled by
+        # default — the safe-default columns (presence / keys / JOSE
+        # metadata) are enough for KPI dashboards; raw is for
+        # operators who need to forensically inspect mandate
+        # structure.
+        self.include_ap2_raw = include_ap2_raw
         self.custom_metadata = custom_metadata
         # UCP order.md: "The URL format is platform-specific." The
         # default `/webhook(s)` prefix lives inside is_webhook_delivery;
@@ -330,6 +348,35 @@ class UCPAnalyticsTracker:
         for body in bodies_to_parse:
             if not body or not isinstance(body, dict):
                 continue
+
+            # A4: AP2 mandate metadata + buyer consent extract from
+            # the ORIGINAL (un-redacted) body. The safe-default
+            # outputs (presence / key-names / SHA-256 / JOSE header
+            # fields / consent flags) are non-PII by construction.
+            # Running them after self._redact() would corrupt
+            # SHA-256 with the hash of "[REDACTED]" and lose the
+            # JOSE header decode, defeating the columns.
+            ap2_fields: Dict[str, Any] = {}
+            UCPResponseParser._extract_ap2_mandate(body.get("ap2"), ap2_fields)
+            UCPResponseParser._extract_buyer_consent(body.get("buyer"), ap2_fields)
+            for key, val in ap2_fields.items():
+                if hasattr(event, key):
+                    setattr(event, key, val)
+
+            # A4: opt-in raw AP2 capture. Always passes through
+            # _redact regardless of self.redact_pii — pii_fields
+            # includes the credential field names by construction so
+            # `merchant_authorization` / `checkout_mandate` strings
+            # are scrubbed before serializing. The capture is gated
+            # on `include_ap2_raw` only; operators who want forensic
+            # mandate inspection opt in, everyone else gets NULL.
+            if self.include_ap2_raw:
+                ap2_obj = body.get("ap2")
+                if isinstance(ap2_obj, dict):
+                    event.ap2_mandate_raw_json = json.dumps(
+                        self._redact(ap2_obj), default=str
+                    )
+
             if self.redact_pii:
                 body = self._redact(body)
             fields = UCPResponseParser.extract(body)

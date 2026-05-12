@@ -68,6 +68,24 @@ class TestUCPEvent:
         assert row["eligibility_not_accepted_present"] is False
         assert row["eligibility_invalid_present"] is False
 
+    def test_ap2_mandate_fields_default_none(self):
+        """A4 — five AP2 columns default to None so rows without
+        AP2 data don't pollute KPIs. Critical for the safe-default
+        guarantee: an operator who hasn't opted into raw capture
+        gets None on `ap2_mandate_raw_json` for every row."""
+        event = UCPEvent()
+        assert event.ap2_mandate_present is None
+        assert event.ap2_mandate_keys_json is None
+        assert event.ap2_mandate_metadata_json is None
+        assert event.buyer_consent_json is None
+        assert event.ap2_mandate_raw_json is None
+        row = event.to_bq_row()
+        assert "ap2_mandate_present" not in row
+        assert "ap2_mandate_keys_json" not in row
+        assert "ap2_mandate_metadata_json" not in row
+        assert "buyer_consent_json" not in row
+        assert "ap2_mandate_raw_json" not in row
+
     def test_embedded_checkout_fields_default_none(self):
         """A3 — three embedded-checkout columns default None so rows
         without discovery / query-param signals don't pollute KPIs."""

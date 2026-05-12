@@ -7,6 +7,10 @@ load time. Private (`_headers`) — not part of the package's public API.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
+import json as _json
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, Mapping, Optional
@@ -309,6 +313,53 @@ _CRV_TO_ALG = {
     "P-256": "ES256",
     "P-384": "ES384",
 }
+
+
+def decode_jose_header(credential: Any) -> Optional[Dict[str, Any]]:
+    """Decode the JOSE header (first dot-separated segment) of a
+    JWS / JWT / SD-JWT credential string.
+
+    Decoding behavior is intentionally narrow: we ONLY decode the
+    first segment (the JOSE header), NEVER the payload (the second
+    segment) or any disclosures. The header carries non-secret
+    metadata like ``alg``, ``kid``, ``typ`` that's useful for
+    analytics; the payload carries privacy-sensitive claims about
+    the buyer / merchant and must not be decoded or persisted.
+
+    JOSE headers are base64url-encoded JSON per RFC 7515. RFC 7515
+    §2 permits the encoder to omit ``=`` padding; we restore it
+    before decoding so well-formed senders that strip padding still
+    parse. Returns None on:
+      * non-string input
+      * no ``.`` in the string (not a JWS/JWT)
+      * base64url decode failure
+      * JSON parse failure
+      * decoded value not a dict
+    """
+    if not isinstance(credential, str) or "." not in credential:
+        return None
+    header_b64 = credential.split(".", 1)[0]
+    padded = header_b64 + "=" * (-len(header_b64) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(padded)
+        parsed = _json.loads(decoded)
+    except (ValueError, TypeError, binascii.Error):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed
+
+
+def credential_sha256(credential: Any) -> Optional[str]:
+    """Hex SHA-256 of a credential string, treating it as opaque.
+
+    Lets dashboards correlate the same credential across rows
+    without persisting the credential itself. Returns None for
+    non-string inputs so the caller's column stays NULL.
+    """
+    if not isinstance(credential, str) or not credential:
+        return None
+    return hashlib.sha256(credential.encode("utf-8")).hexdigest()
 
 
 def signature_alg_from_jwk(jwk: Optional[Mapping[str, Any]]) -> Optional[str]:
