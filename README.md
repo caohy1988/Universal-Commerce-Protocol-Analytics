@@ -110,7 +110,7 @@ Every call to `/checkout-sessions`, `/.well-known/ucp`, `/orders`, `/carts`,
 
 ## Events Tracked
 
-All 27 UCP event types are auto-classified from HTTP method + path + response body:
+Every UCP event type is auto-classified from HTTP method + path + response body. The canonical list lives in [`src/ucp_analytics/events.py::UCPEventType`](src/ucp_analytics/events.py); the groups below are the categorical view.
 
 ### Checkout (6)
 
@@ -132,17 +132,28 @@ All 27 UCP event types are auto-classified from HTTP method + path + response bo
 | `PUT /carts/{id}` | `cart_updated` |
 | `POST /carts/{id}/cancel` | `cart_canceled` |
 
-### Order (6)
+### Catalog (3)
+
+| HTTP Operation | Event Type |
+|---|---|
+| `POST /catalog/search` | `catalog_search` |
+| `POST /catalog/lookup` | `catalog_lookup` |
+| `POST /catalog/product` | `catalog_product_get` |
+
+### Order (8)
+
+Order lifecycle at UCP `c5c6139` derives from `fulfillment.events[]` and `adjustments[]`; legacy top-level `status` is the fallback for pre-c5c6139 senders.
 
 | HTTP Operation | Event Type |
 |---|---|
 | `POST /orders` | `order_created` |
-| `GET /orders/{id}` *(status=confirmed)* | `order_updated` |
-| `GET /orders/{id}` *(status=shipped)* | `order_shipped` |
-| `GET /orders/{id}` *(status=delivered)* | `order_delivered` |
-| `GET /orders/{id}` *(status=returned)* | `order_returned` |
-| `GET /orders/{id}` *(status=canceled)* | `order_canceled` |
-| `POST /webhooks/partners/{id}/events/order` | *(by request body status)* |
+| `GET /orders/{id}` *(no lifecycle)* | `order_get` |
+| `PUT /orders/{id}` *(no lifecycle)* | `order_updated` |
+| `GET`/`PUT` `/orders/{id}` *(latest fulfillment event is shipped or in_transit)* | `order_shipped` |
+| `GET`/`PUT` `/orders/{id}` *(...is delivered)* | `order_delivered` |
+| `GET`/`PUT` `/orders/{id}` *(...is returned_to_sender, or adjustments[].type is refund/return)* | `order_returned` |
+| `GET`/`PUT` `/orders/{id}` *(...is canceled/undeliverable, or adjustments[].type is cancellation)* | `order_canceled` |
+| Webhook delivery (path or `Webhook-Id` + `Webhook-Timestamp` header pair) without recognizable lifecycle | `order_webhook_received` |
 
 ### Identity (3)
 
@@ -216,8 +227,8 @@ Eight runnable examples are included — see [`examples/README.md`](examples/REA
 | [`order_lifecycle_demo.py`](examples/order_lifecycle_demo.py) | Yes | REST | Order delivered/returned/canceled (8 types) |
 | [`transport_demo.py`](examples/transport_demo.py) | Yes | REST/MCP/A2A | All 3 transports compared (5 types) |
 | [`identity_payment_demo.py`](examples/identity_payment_demo.py) | Yes | REST | Identity linking + payment flows (10 types) |
-| [`bq_demo.py`](examples/bq_demo.py) | Yes | REST/MCP/A2A | All 27 event types, 3 transports, BQ verification |
-| [`bq_adk_demo.py`](examples/bq_adk_demo.py) | Yes | ADK/MCP/A2A | All 27 event types via ADK plugin, BQ verification |
+| [`bq_demo.py`](examples/bq_demo.py) | Yes | REST/MCP/A2A | Every event type, 3 transports, BQ verification |
+| [`bq_adk_demo.py`](examples/bq_adk_demo.py) | Yes | ADK/MCP/A2A | Every event type via ADK plugin, BQ verification |
 
 Shared configuration lives in [`examples/_demo_utils.py`](examples/_demo_utils.py).
 Set `GCP_PROJECT_ID` in your environment or edit the file directly.
@@ -256,8 +267,8 @@ Universal-Commerce-Protocol-Analytics/
 │   ├── order_lifecycle_demo.py     # order lifecycle
 │   ├── transport_demo.py           # REST vs MCP vs A2A
 │   ├── identity_payment_demo.py    # identity + payment flows
-│   ├── bq_demo.py                  # comprehensive BQ demo (all 27 types)
-│   ├── bq_adk_demo.py             # comprehensive ADK demo (all 27 types)
+│   ├── bq_demo.py                  # comprehensive BQ demo (every event type)
+│   ├── bq_adk_demo.py             # comprehensive ADK demo (every event type)
 │   └── README.md                   # example guide with run instructions
 ├── dashboards/queries.sql          # 10 BigQuery analytics queries
 ├── docs/

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ADK + BigQuery Comprehensive Demo — All 27 Event Types, 3 Transports
+ADK + BigQuery Comprehensive Demo — Every Event Type, 3 Transports
 ======================================================================
 
 Demonstrates the UCPAgentAnalyticsPlugin with simulated ADK tool flows
@@ -35,7 +35,7 @@ from ucp_analytics.adk_plugin import UCPAgentAnalyticsPlugin
 
 APP_NAME = "bq_adk_demo"
 
-ALL_27_EVENT_TYPES = sorted(e.value for e in UCPEventType)
+ALL_EVENT_TYPES = sorted(e.value for e in UCPEventType)
 
 # ==========================================================================
 # Simulated ADK Tool Interface
@@ -395,8 +395,12 @@ async def run_plugin_phase(plugin: UCPAgentAnalyticsPlugin):
             ORDER_CREATED_RESULT, "order_created",
         ),
         (
+            # GET /orders/{id} with a body that has no recognizable
+            # lifecycle status (legacy `confirmed` isn't mapped by
+            # the c5c6139 lifecycle helper) -> order_get under the
+            # new B5 / B8 taxonomy.
             "get_order", {"order_id": ORDER_ID},
-            ORDER_CONFIRMED_RESULT, "order_updated",
+            ORDER_CONFIRMED_RESULT, "order_get",
         ),
         (
             "simulate_shipping", {"order_id": ORDER_ID},
@@ -701,14 +705,14 @@ async def verify_bigquery():
 
     # Verification checks
     found_types = set(event_map.keys())
-    expected_types = set(ALL_27_EVENT_TYPES)
+    expected_types = set(ALL_EVENT_TYPES)
     missing = expected_types - found_types
     extra = found_types - expected_types
 
     print(f"\n   Event types found: {len(found_types)}/27")
 
     print("\n   Verification:")
-    print(f"     [{'PASS' if not missing else 'FAIL'}] All 27 event types present")
+    print(f"     [{'PASS' if not missing else 'FAIL'}] Every event type present")
     if missing:
         print(f"       Missing: {sorted(missing)}")
     if extra:

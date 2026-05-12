@@ -113,8 +113,10 @@ host-side instrumentation exists.
   only, NEVER values).
 - Opt-in raw: `signals_json` gated on `include_signals_raw=True`;
   `dev.ucp.buyer_ip` and `dev.ucp.user_agent` force-included in
-  redaction; operators extend via `pii_fields` for additional
-  reverse-domain PII signals.
+  redaction. Operators can provide a custom `pii_fields` set
+  (including the defaults if they want to preserve them) for
+  additional reverse-domain PII signals; the force-included keys
+  are always OR'd in afterward.
 
 #### Payment discovery
 - `payment_available_instruments_json` from

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-BigQuery Comprehensive Demo — All 27 Event Types, 3 Transports
+BigQuery Comprehensive Demo — Every Event Type, 3 Transports
 ================================================================
 
 Runs a mini UCP merchant server + shopping agent client. Exercises every
@@ -520,14 +520,14 @@ async def unmatched_endpoint(request: Request):
 
 
 # ==========================================================================
-# Shopping Agent — REST transport (all 27 event types)
+# Shopping Agent — REST transport (every event type)
 # ==========================================================================
 
-ALL_27_EVENT_TYPES = sorted(e.value for e in UCPEventType)
+ALL_EVENT_TYPES = sorted(e.value for e in UCPEventType)
 
 
 async def run_rest_flow(client_tracker: UCPAnalyticsTracker) -> tuple[str, str]:
-    """Run the full REST flow generating events for all 27 types."""
+    """Run the full REST flow generating events for every UCPEventType."""
     print("\n" + "=" * 70)
     print("  PHASE 1: REST Transport — Full Event Coverage")
     print("=" * 70)
@@ -719,8 +719,8 @@ async def run_rest_flow(client_tracker: UCPAnalyticsTracker) -> tuple[str, str]:
         direct_order_id = direct_order["id"]
         print(f"   Order: {direct_order_id}")
 
-        # 13. Get Order (confirmed) -> order_updated
-        print("\n-- 13. Get Order confirmed (order_updated) --")
+        # 13. Get Order (no lifecycle in body) -> order_get
+        print("\n-- 13. Get Order (order_get) --")
         resp = await client.get(f"/orders/{direct_order_id}")
         print(f"   Order status: {resp.json()['status']}")
 
@@ -980,7 +980,7 @@ async def run_a2a_transport(
 
 
 # ==========================================================================
-# BigQuery Verification — check all 27 event types
+# BigQuery Verification — check every event type
 # ==========================================================================
 
 
@@ -1045,14 +1045,14 @@ async def verify_bigquery(session_id: str):
 
     # Verification checks
     found_types = set(event_map.keys())
-    expected_types = set(ALL_27_EVENT_TYPES)
+    expected_types = set(ALL_EVENT_TYPES)
     missing = expected_types - found_types
     extra = found_types - expected_types
 
     print(f"\n   Event types found: {len(found_types)}/27")
 
     print("\n   Verification:")
-    print(f"     [{'PASS' if not missing else 'FAIL'}] All 27 event types present")
+    print(f"     [{'PASS' if not missing else 'FAIL'}] Every event type present")
     if missing:
         print(f"       Missing: {sorted(missing)}")
     if extra:
@@ -1116,7 +1116,7 @@ async def main():
             await asyncio.sleep(0.1)
 
     try:
-        # Phase 1: REST transport — all 27 event types
+        # Phase 1: REST transport — every event type
         session_id, order_id = await run_rest_flow(client_tracker)
 
         # Phase 2: MCP transport replay
