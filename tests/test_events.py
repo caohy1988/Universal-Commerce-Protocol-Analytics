@@ -68,6 +68,21 @@ class TestUCPEvent:
         assert row["eligibility_not_accepted_present"] is False
         assert row["eligibility_invalid_present"] is False
 
+    def test_totals_json_and_order_label_default_none(self):
+        """B1/C9/C7 finisher — `totals_json` and `order_label` default
+        None so rows without the data don't pollute KPIs."""
+        event = UCPEvent()
+        assert event.totals_json is None
+        assert event.order_label is None
+        row = event.to_bq_row()
+        assert "totals_json" not in row
+        assert "order_label" not in row
+
+    def test_order_get_event_type_value(self):
+        """B5 finisher — ORDER_GET enum value pinned for downstream
+        dashboards that filter on event_type string."""
+        assert UCPEventType.ORDER_GET.value == "order_get"
+
     def test_signals_fields_default_none(self):
         """A6 — three signals columns default None. Same safe-default
         guarantee as A4: operators who haven't opted into raw capture
