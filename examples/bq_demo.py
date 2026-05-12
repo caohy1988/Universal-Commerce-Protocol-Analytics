@@ -195,17 +195,11 @@ async def update_checkout(session_id: str, request: Request):
         session["fulfillment"] = body["fulfillment"]
         shipping = 599
         keep = ("fulfillment", "total")
-        session["totals"] = [
-            t for t in session["totals"] if t["type"] not in keep
-        ]
+        session["totals"] = [t for t in session["totals"] if t["type"] not in keep]
         subtotal = next(
-            t["amount"] for t in session["totals"]
-            if t["type"] == "subtotal"
+            t["amount"] for t in session["totals"] if t["type"] == "subtotal"
         )
-        tax = next(
-            t["amount"] for t in session["totals"]
-            if t["type"] == "tax"
-        )
+        tax = next(t["amount"] for t in session["totals"] if t["type"] == "tax")
         session["totals"].append({"type": "fulfillment", "amount": shipping})
         session["totals"].append({"type": "total", "amount": subtotal + tax + shipping})
 
@@ -401,6 +395,54 @@ async def cancel_cart(cart_id: str):
     return JSONResponse(cart)
 
 
+# --- Catalog endpoints ---
+@app.post("/catalog/search")
+async def catalog_search(request: Request):
+    body = await request.json()
+    return JSONResponse(
+        {
+            "products": [
+                {"id": "sku_rose", "title": "Rose Bouquet", "price": 2999},
+                {"id": "sku_lily", "title": "Lily Bouquet", "price": 3499},
+            ],
+            "query": body.get("query", ""),
+        }
+    )
+
+
+@app.post("/catalog/lookup")
+async def catalog_lookup(request: Request):
+    body = await request.json()
+    return JSONResponse(
+        {
+            "products": [
+                {"id": pid, "title": f"Product {pid}", "price": 1999}
+                for pid in body.get("ids", [])
+            ],
+        }
+    )
+
+
+@app.post("/catalog/product")
+async def catalog_product(request: Request):
+    body = await request.json()
+    return JSONResponse(
+        {
+            "id": body.get("id", "sku_rose"),
+            "title": "Rose Bouquet",
+            "price": 2999,
+            "variants": [],
+        }
+    )
+
+
+# --- Webhook endpoint (order events) ---
+@app.post("/webhooks/orders")
+async def webhook_orders(request: Request):
+    """Operator-specific webhook URL the platform posts order events to."""
+    return JSONResponse({"status": "ok"})
+
+
 # --- Order endpoints ---
 @app.post("/orders")
 async def create_order(request: Request):
@@ -436,11 +478,43 @@ async def get_order(order_id: str):
     return JSONResponse(ORDERS[order_id])
 
 
+@app.put("/orders/{order_id}")
+async def update_order(order_id: str, request: Request):
+    """REST-driven order mutation — classifies as order_updated."""
+    if order_id not in ORDERS:
+        return JSONResponse({"error": "not_found"}, status_code=404)
+    body = await request.json()
+    # Allow label updates; leave lifecycle state alone (otherwise
+    # the lifecycle wins on the classifier).
+    if "label" in body:
+        ORDERS[order_id]["label"] = body["label"]
+    return JSONResponse(ORDERS[order_id])
+
+
+def _append_fulfillment_event(order_id: str, event_type: str) -> None:
+    """Append a c5c6139-shape fulfillment event with a fresh
+    occurred_at, so the lifecycle classifier picks the latest entry."""
+    from datetime import datetime, timezone
+
+    ORDERS[order_id]["fulfillment"].setdefault("events", []).append(
+        {
+            "id": f"fe_{uuid.uuid4().hex[:6]}",
+            "occurred_at": datetime.now(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "type": event_type,
+            "line_items": [],
+        }
+    )
+    # Keep legacy `status` field in sync for older dashboards.
+    ORDERS[order_id]["status"] = event_type
+
+
 @app.post("/orders/{order_id}/deliver")
 async def deliver_order(order_id: str):
     if order_id not in ORDERS:
         return JSONResponse({"error": "not_found"}, status_code=404)
-    ORDERS[order_id]["status"] = "delivered"
+    _append_fulfillment_event(order_id, "delivered")
     return JSONResponse(ORDERS[order_id])
 
 
@@ -448,7 +522,7 @@ async def deliver_order(order_id: str):
 async def return_order(order_id: str):
     if order_id not in ORDERS:
         return JSONResponse({"error": "not_found"}, status_code=404)
-    ORDERS[order_id]["status"] = "returned"
+    _append_fulfillment_event(order_id, "returned_to_sender")
     return JSONResponse(ORDERS[order_id])
 
 
@@ -456,7 +530,7 @@ async def return_order(order_id: str):
 async def cancel_order(order_id: str):
     if order_id not in ORDERS:
         return JSONResponse({"error": "not_found"}, status_code=404)
-    ORDERS[order_id]["status"] = "canceled"
+    _append_fulfillment_event(order_id, "canceled")
     return JSONResponse(ORDERS[order_id])
 
 
@@ -464,14 +538,13 @@ async def cancel_order(order_id: str):
 async def simulate_shipping(order_id: str):
     if order_id not in ORDERS:
         return JSONResponse({"error": "not_found"}, status_code=404)
-    ORDERS[order_id]["status"] = "shipped"
-    ORDERS[order_id]["fulfillment"]["events"] = [
+    _append_fulfillment_event(order_id, "shipped")
+    ORDERS[order_id]["fulfillment"]["events"][-1].update(
         {
-            "type": "shipped",
             "tracking_number": "9400111899223456789012",
             "carrier": "USPS",
-        },
-    ]
+        }
+    )
     return JSONResponse(ORDERS[order_id])
 
 
@@ -495,13 +568,15 @@ async def identity_callback(request: Request):
     link_id = request.query_params.get("state", "")
     identity = IDENTITIES.get(link_id, {})
     identity["status"] = "linked"
-    return JSONResponse({
-        "identity": {
-            "provider": identity.get("provider", "google"),
-            "scope": identity.get("scope", "profile email"),
-        },
-        "status": "linked",
-    })
+    return JSONResponse(
+        {
+            "identity": {
+                "provider": identity.get("provider", "google"),
+                "scope": identity.get("scope", "profile email"),
+            },
+            "status": "linked",
+        }
+    )
 
 
 @app.post("/identity/revoke")
@@ -547,6 +622,24 @@ async def run_rest_flow(client_tracker: UCPAnalyticsTracker) -> tuple[str, str]:
         resp = await client.get("/.well-known/ucp")
         profile = resp.json()
         print(f"   UCP version: {profile['ucp']['version']}")
+
+        # 1a. Catalog Search -> catalog_search
+        print("\n-- 1a. Catalog Search (catalog_search) --")
+        resp = await client.post("/catalog/search", json={"query": "roses"})
+        print(f"   Found: {len(resp.json().get('products', []))} products")
+
+        # 1b. Catalog Lookup -> catalog_lookup
+        print("\n-- 1b. Catalog Lookup (catalog_lookup) --")
+        resp = await client.post(
+            "/catalog/lookup",
+            json={"ids": ["bouquet_roses", "sunflower_bunch"]},
+        )
+        print(f"   Looked up: {len(resp.json().get('products', []))} products")
+
+        # 1c. Catalog Product Get -> catalog_product_get
+        print("\n-- 1c. Catalog Product Get (catalog_product_get) --")
+        resp = await client.post("/catalog/product", json={"id": "bouquet_roses"})
+        print(f"   Product: {resp.json().get('title')}")
 
         # 2. Create Checkout -> checkout_session_created
         print("\n-- 2. Create Checkout (checkout_session_created) --")
@@ -724,6 +817,14 @@ async def run_rest_flow(client_tracker: UCPAnalyticsTracker) -> tuple[str, str]:
         resp = await client.get(f"/orders/{direct_order_id}")
         print(f"   Order status: {resp.json()['status']}")
 
+        # 13a. Update Order (PUT, REST mutation) -> order_updated
+        print("\n-- 13a. Update Order (order_updated) --")
+        resp = await client.put(
+            f"/orders/{direct_order_id}",
+            json={"label": "ORD-2026-00042"},
+        )
+        print(f"   Order label: {resp.json().get('label')}")
+
         # 14. Simulate Shipping -> order_shipped
         print("\n-- 14. Simulate Shipping (order_shipped) --")
         resp = await client.post(f"/testing/simulate-shipping/{direct_order_id}")
@@ -824,19 +925,59 @@ async def run_rest_flow(client_tracker: UCPAnalyticsTracker) -> tuple[str, str]:
             event_type="capability_negotiated",
             app_name=APP_NAME,
             ucp_version=UCP_VERSION,
-            capabilities_json=json.dumps([
-                {"name": "dev.ucp.shopping.checkout", "version": UCP_VERSION},
-                {"name": "dev.ucp.shopping.fulfillment", "version": UCP_VERSION},
-            ]),
+            capabilities_json=json.dumps(
+                [
+                    {"name": "dev.ucp.shopping.checkout", "version": UCP_VERSION},
+                    {"name": "dev.ucp.shopping.fulfillment", "version": UCP_VERSION},
+                ]
+            ),
             latency_ms=10.0,
         )
         await client_tracker.record_event(event)
         print("   Recorded: capability_negotiated")
 
-        # 26. Error event -> error (404)
-        print("\n-- 26. Error (404) --")
-        resp = await client.get("/checkout-sessions/nonexistent_session")
-        print(f"   Status code: {resp.status_code}")
+        # 25a. Order webhook with no recognizable lifecycle status
+        # -> order_webhook_received. We post to a webhook URL with a
+        # body that intentionally has no fulfillment.events / no
+        # adjustments / no legacy status, so the classifier enters
+        # the webhook branch and falls all the way through to the
+        # generic-receipt type.
+        print("\n-- 25a. Order Webhook Received (order_webhook_received) --")
+        await client_tracker.record_http(
+            method="POST",
+            url=str(client.base_url) + "/webhooks/orders",
+            status_code=200,
+            request_headers={
+                "Webhook-Id": f"evt_{uuid.uuid4().hex[:10]}",
+                "Webhook-Timestamp": "1767225600",
+            },
+            request_body={
+                # Order-shaped but no lifecycle: no fulfillment.events,
+                # no adjustments, no top-level status.
+                "id": direct_order_id,
+                "checkout_id": session_id,
+            },
+            response_body={"status": "ok"},
+            latency_ms=4.0,
+        )
+
+        # 26. Error event -> error
+        # Hits a webhook URL with status >= 400. The classifier enters
+        # the webhook branch (path matches /webhook(s)) and immediately
+        # returns ERROR on the 4xx status — distinct from the previous
+        # "404 on /checkout-sessions/{id}" attempt, which classifier-
+        # priorities through CHECKOUT_SESSION_GET first regardless of
+        # status. Manual record so we don't depend on a 4xx route on
+        # the test server.
+        print("\n-- 26. Error event (error) --")
+        await client_tracker.record_http(
+            method="POST",
+            url=str(client.base_url) + "/webhooks/orders",
+            status_code=500,
+            request_body={"reason": "test-error-trigger"},
+            response_body={"error": "internal_server_error"},
+            latency_ms=8.0,
+        )
 
         # 27. Fallback request -> request (unmatched path 200)
         print("\n-- 27. Fallback Request (unmatched path) --")
@@ -849,6 +990,7 @@ async def run_rest_flow(client_tracker: UCPAnalyticsTracker) -> tuple[str, str]:
 # ==========================================================================
 # MCP Transport — replay key operations
 # ==========================================================================
+
 
 # Shared response bodies for MCP/A2A replay
 def _build_replay_bodies(session_id: str, order_id: str) -> dict:
@@ -907,7 +1049,9 @@ def _build_replay_bodies(session_id: str, order_id: str) -> dict:
 
 
 async def run_mcp_transport(
-    tracker: UCPAnalyticsTracker, session_id: str, order_id: str,
+    tracker: UCPAnalyticsTracker,
+    session_id: str,
+    order_id: str,
 ):
     """Replay key operations via MCP transport."""
     print("\n" + "=" * 70)
@@ -946,7 +1090,9 @@ async def run_mcp_transport(
 
 
 async def run_a2a_transport(
-    tracker: UCPAnalyticsTracker, session_id: str, order_id: str,
+    tracker: UCPAnalyticsTracker,
+    session_id: str,
+    order_id: str,
 ):
     """Replay key operations via A2A transport."""
     print("\n" + "=" * 70)
@@ -1049,7 +1195,7 @@ async def verify_bigquery(session_id: str):
     missing = expected_types - found_types
     extra = found_types - expected_types
 
-    print(f"\n   Event types found: {len(found_types)}/27")
+    print(f"\n   Event types found: {len(found_types)}/{len(ALL_EVENT_TYPES)}")
 
     print("\n   Verification:")
     print(f"     [{'PASS' if not missing else 'FAIL'}] Every event type present")

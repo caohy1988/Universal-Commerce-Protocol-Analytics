@@ -572,7 +572,7 @@ Safe-by-default columns capture only key names. The raw column is opt-in via `in
 |---|---|---|---|
 | `signals_present` | `BOOL` | `NULLABLE` | Whether `body.signals` carries any entries |
 | `signals_keys_json` | `JSON` | `NULLABLE` | Names of signal keys (reverse-domain identifiers); **NEVER** the values |
-| `signals_json` | `JSON` | `NULLABLE` | (Opt-in) Original `body.signals` after `_redact`. Documented PII signal values always scrubbed; operators extend redaction via `pii_fields` for additional reverse-domain PII signals. |
+| `signals_json` | `JSON` | `NULLABLE` | (Opt-in) Original `body.signals` after `_redact`. Documented PII signal values always scrubbed. Operators can provide a custom `pii_fields` set (override semantics — include the defaults yourself if you want to preserve them) for additional reverse-domain PII signals; the force-included keys are always OR'd in afterward. |
 
 ### Errors & Messages
 

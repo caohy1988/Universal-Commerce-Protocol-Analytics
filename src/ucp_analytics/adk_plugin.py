@@ -70,6 +70,12 @@ class UCPAgentAnalyticsPlugin(BasePlugin):  # type: ignore[misc]
         "ucp_",
         "negotiate",
         "customer_details",
+        # `simulate_shipping` is a UCP samples-server testing endpoint
+        # (see `/testing/simulate-shipping/{id}` in `examples/bq_demo.py`).
+        # The `_TOOL_TO_HTTP` map below already routes it, but it needs
+        # a pattern match so `_is_ucp_tool` returns True and the
+        # ADK callback records the event.
+        "simulate",
     ]
 
     # Map ADK tool names → (HTTP method, path) for accurate event classification.
@@ -91,6 +97,8 @@ class UCPAgentAnalyticsPlugin(BasePlugin):  # type: ignore[misc]
         "get_product": ("POST", "/catalog/product"),
         "create_order": ("POST", "/orders"),
         "get_order": ("GET", "/orders/{id}"),
+        "update_order": ("PUT", "/orders/{id}"),
+        "order_event_webhook": ("POST", "/webhooks/partners/{id}/events/order"),
         "simulate_shipping": ("POST", "/testing/simulate-shipping/{id}"),
         "add_to_checkout": ("PUT", "/checkout-sessions/{id}"),
         "remove_from_checkout": ("PUT", "/checkout-sessions/{id}"),
