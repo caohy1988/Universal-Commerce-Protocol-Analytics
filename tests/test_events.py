@@ -68,6 +68,19 @@ class TestUCPEvent:
         assert row["eligibility_not_accepted_present"] is False
         assert row["eligibility_invalid_present"] is False
 
+    def test_signals_fields_default_none(self):
+        """A6 — three signals columns default None. Same safe-default
+        guarantee as A4: operators who haven't opted into raw capture
+        get None on `signals_json` for every row."""
+        event = UCPEvent()
+        assert event.signals_present is None
+        assert event.signals_keys_json is None
+        assert event.signals_json is None
+        row = event.to_bq_row()
+        assert "signals_present" not in row
+        assert "signals_keys_json" not in row
+        assert "signals_json" not in row
+
     def test_ap2_mandate_fields_default_none(self):
         """A4 — five AP2 columns default to None so rows without
         AP2 data don't pollute KPIs. Critical for the safe-default

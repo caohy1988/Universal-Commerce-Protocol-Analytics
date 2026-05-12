@@ -42,6 +42,13 @@ _BUYER_CONSENT_FIELDS = frozenset(
     {"analytics", "preferences", "marketing", "sale_of_data"}
 )
 
+# A6: known PII signal keys per UCP `signals.json` at c5c6139.
+# The signals dict is open (`additionalProperties: true`) with
+# reverse-domain key naming, so operators can ship additional
+# signals; these are the documented ones that MUST be redacted in
+# any raw capture. The tracker force-includes these in pii_fields.
+_KNOWN_PII_SIGNAL_KEYS = frozenset({"dev.ucp.buyer_ip", "dev.ucp.user_agent"})
+
 # A5 — Eligibility verification outcome codes. Per UCP `eligibility.md`,
 # verification outcomes surface through `messages[].code` rather than a
 # structured boolean. The trio is mutually exclusive in well-formed
@@ -563,6 +570,13 @@ class UCPResponseParser:
         # --- A3: embedded transport config from ucp.services[*] ---
         cls._extract_embedded_services(body.get("ucp"), result)
 
+        # --- A6: authorization / abuse signals safe-default ---
+        # Only presence + key names. The values may carry IP /
+        # user-agent / fingerprint data and never appear in the
+        # safe-default columns. Raw signals capture (gated on
+        # tracker `include_signals_raw`) lives in the tracker.
+        cls._extract_signals(body.get("signals"), result)
+
         # NOTE: A4 (AP2 mandate metadata + buyer consent) is NOT
         # extracted here. Those fields need the un-redacted body to
         # compute SHA-256 / decode JOSE headers, while this `extract`
@@ -920,6 +934,45 @@ class UCPResponseParser:
             result["embedded_delegations_json"] = json.dumps(delegations)
         if color_schemes:
             result["embedded_color_schemes_json"] = json.dumps(color_schemes)
+
+    @classmethod
+    def _extract_signals(cls, signals: Any, result: Dict[str, Any]) -> None:
+        """Capture safe-default metadata from ``body.signals``.
+
+        Per ``signals.json`` at c5c6139, the signals object is a
+        reverse-domain-keyed dict with ``additionalProperties: true``.
+        Known PII signals (``dev.ucp.buyer_ip``,
+        ``dev.ucp.user_agent``) live alongside operator-extended
+        signals using the same shape.
+
+        Safe-default extraction surfaces only:
+          * presence (BOOL) -- whether any signals are present
+          * key names (JSON array of strings) -- the signal IDs that
+            were observed. Never the values, which carry IP /
+            user-agent / fingerprint data.
+
+        Insertion order is preserved (dict iteration order is the
+        wire order on Python 3.7+) so dashboards reading the JSON
+        array see the signals in the order the sender shipped them.
+
+        Defensive: non-dict ``signals`` is skipped silently; an
+        empty dict leaves the columns NULL rather than serializing
+        an empty array (three-state: NULL = "no signals observed",
+        distinct from "signals shipped but empty").
+
+        Non-string keys (malformed senders) are dropped from the
+        keys list; the BOOL `signals_present` still reflects the
+        original dict's emptiness so we don't drop the row entirely
+        on a bad sender.
+        """
+        if not isinstance(signals, dict) or not signals:
+            return
+        # Presence is true as long as any entry was shipped; the
+        # operator may want to know about malformed deliveries.
+        result["signals_present"] = True
+        keys = [k for k in signals.keys() if isinstance(k, str)]
+        if keys:
+            result["signals_keys_json"] = json.dumps(keys)
 
     @classmethod
     def _extract_ap2_mandate(cls, ap2: Any, result: Dict[str, Any]) -> None:

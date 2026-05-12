@@ -1473,6 +1473,320 @@ class TestAp2MandateRawCapture:
         assert "+15551234567" not in row_json
 
 
+class TestSignalsRawCapture:
+    """A6 — opt-in `include_signals_raw=True` surfaces the raw
+    `body.signals` dict into `signals_json` AFTER `_redact`. The
+    known PII signal keys (`dev.ucp.buyer_ip`, `dev.ucp.user_agent`)
+    are force-included in pii_fields so values are scrubbed even
+    when `redact_pii` is off or operator-provided pii_fields lists
+    don't mention them."""
+
+    async def test_raw_absent_by_default(self, tracker, mock_writer):
+        """Default tracker leaves `signals_json` None even when
+        signals are present. Safe-default columns still populate."""
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            response_body={
+                "id": "chk_123",
+                "signals": {
+                    "dev.ucp.buyer_ip": "192.0.2.1",
+                    "dev.ucp.user_agent": "Mozilla/5.0 secret-fingerprint",
+                },
+            },
+        )
+        # Safe defaults populate.
+        assert event.signals_present is True
+        keys = json.loads(event.signals_keys_json)
+        assert keys == ["dev.ucp.buyer_ip", "dev.ucp.user_agent"]
+        # Raw column is NULL.
+        assert event.signals_json is None
+        # And no PII values appear anywhere in the BQ row.
+        row_json = json.dumps(event.to_bq_row())
+        assert "192.0.2.1" not in row_json
+        assert "Mozilla/5.0" not in row_json
+        assert "secret-fingerprint" not in row_json
+
+    async def test_raw_opt_in_redacts_known_pii_signals(self, mock_writer):
+        """With `include_signals_raw=True`, raw column populates BUT
+        the documented PII signal values are scrubbed. The signal
+        key names survive (dashboards can confirm which signals were
+        present) but `dev.ucp.buyer_ip` / `dev.ucp.user_agent` values
+        are `[REDACTED]`."""
+        tracker = UCPAnalyticsTracker(
+            project_id="test",
+            include_signals_raw=True,
+        )
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            response_body={
+                "id": "chk_123",
+                "signals": {
+                    "dev.ucp.buyer_ip": "192.0.2.1",
+                    "dev.ucp.user_agent": "Mozilla/5.0 (privacy)",
+                },
+            },
+        )
+        assert event.signals_json is not None
+        raw = json.loads(event.signals_json)
+        # Both keys preserved.
+        assert "dev.ucp.buyer_ip" in raw
+        assert "dev.ucp.user_agent" in raw
+        # But values are redacted.
+        assert raw["dev.ucp.buyer_ip"] == "[REDACTED]"
+        assert raw["dev.ucp.user_agent"] == "[REDACTED]"
+        # And the original values never appear in the serialized
+        # raw column (or anywhere in the BQ row).
+        row_json = json.dumps(event.to_bq_row())
+        assert "192.0.2.1" not in row_json
+        assert "Mozilla/5.0" not in row_json
+        assert "privacy" not in row_json
+
+    async def test_raw_opt_in_preserves_non_pii_signals(self, mock_writer):
+        """Operators may ship merchant-specific signals (e.g.
+        `dev.merchant.session_count`) that are NOT PII. Those should
+        land verbatim in the raw column; only the documented PII
+        signal keys are force-redacted by default."""
+        tracker = UCPAnalyticsTracker(
+            project_id="test",
+            include_signals_raw=True,
+        )
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            response_body={
+                "id": "chk_123",
+                "signals": {
+                    "dev.ucp.buyer_ip": "192.0.2.1",
+                    "dev.merchant.session_count": 5,
+                    "dev.merchant.risk_score": 0.87,
+                },
+            },
+        )
+        raw = json.loads(event.signals_json)
+        # PII signal redacted.
+        assert raw["dev.ucp.buyer_ip"] == "[REDACTED]"
+        # Non-PII signals pass through unredacted.
+        assert raw["dev.merchant.session_count"] == 5
+        assert raw["dev.merchant.risk_score"] == 0.87
+
+    async def test_pii_signals_redacted_even_with_custom_pii_fields(self, mock_writer):
+        """Operators who pass their own `pii_fields` list (often to
+        add merchant-specific PII keys) must NOT accidentally lose
+        the documented signal redaction. The known PII signal keys
+        are force-OR-ed into pii_fields regardless. Same safety
+        guarantee as A4 with AP2 credentials."""
+        tracker = UCPAnalyticsTracker(
+            project_id="test",
+            # Operator provides a custom list (no UCP signals).
+            pii_fields=["dev.merchant.custom_pii"],
+            include_signals_raw=True,
+        )
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            response_body={
+                "id": "chk_123",
+                "signals": {
+                    "dev.ucp.buyer_ip": "192.0.2.1",
+                    "dev.ucp.user_agent": "Mozilla/5.0",
+                    "dev.merchant.custom_pii": "operator-specific-secret",
+                },
+            },
+        )
+        raw = json.loads(event.signals_json)
+        # Documented PII signals still redacted.
+        assert raw["dev.ucp.buyer_ip"] == "[REDACTED]"
+        assert raw["dev.ucp.user_agent"] == "[REDACTED]"
+        # Operator-added field also redacted.
+        assert raw["dev.merchant.custom_pii"] == "[REDACTED]"
+
+    async def test_operator_extension_for_new_pii_signal(self, mock_writer):
+        """Operators on platforms shipping additional reverse-domain
+        PII signals (per the spec's `additionalProperties: true`)
+        can extend pii_fields to redact those. Acceptance for the
+        issue #8 requirement that operator-configured reverse-domain
+        keys are redactable."""
+        tracker = UCPAnalyticsTracker(
+            project_id="test",
+            # Note: extending pii_fields here also extends the
+            # default set (the docs default applies when no list is
+            # given). When the operator provides their own list, the
+            # documented signals are force-ORed in anyway.
+            pii_fields=[
+                "email",
+                "phone",
+                "first_name",
+                "dev.partner.fingerprint",
+            ],
+            include_signals_raw=True,
+        )
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            response_body={
+                "id": "chk_123",
+                "signals": {
+                    "dev.ucp.buyer_ip": "192.0.2.1",
+                    "dev.partner.fingerprint": "fp-secret-data",
+                },
+            },
+        )
+        raw = json.loads(event.signals_json)
+        assert raw["dev.ucp.buyer_ip"] == "[REDACTED]"
+        # Operator-extended signal also redacted.
+        assert raw["dev.partner.fingerprint"] == "[REDACTED]"
+
+    async def test_safe_defaults_unaffected_by_redact_pii(self, mock_writer):
+        """The safe-default columns (signals_present,
+        signals_keys_json) carry only key names, so they're the same
+        regardless of `redact_pii` — the key set in the dict doesn't
+        change when values are redacted. Pin that enabling general
+        redaction doesn't accidentally drop these columns."""
+        tracker = UCPAnalyticsTracker(
+            project_id="test",
+            redact_pii=True,
+        )
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            response_body={
+                "id": "chk_123",
+                "signals": {
+                    "dev.ucp.buyer_ip": "10.0.0.1",
+                    "dev.ucp.user_agent": "UA-secret",
+                },
+            },
+        )
+        assert event.signals_present is True
+        keys = json.loads(event.signals_keys_json)
+        assert keys == ["dev.ucp.buyer_ip", "dev.ucp.user_agent"]
+        # No PII anywhere.
+        row_json = json.dumps(event.to_bq_row())
+        assert "10.0.0.1" not in row_json
+        assert "UA-secret" not in row_json
+
+    async def test_no_signals_object_no_raw_column(self, tracker, mock_writer):
+        """No signals dict on the body → no raw column either, even
+        with include_signals_raw on. We don't fabricate an empty
+        signals dict — three-state NULL preserved."""
+        tracker = UCPAnalyticsTracker(
+            project_id="test",
+            include_signals_raw=True,
+        )
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            response_body={"id": "chk_123"},
+        )
+        assert event.signals_json is None
+        assert event.signals_present is None
+
+    async def test_non_string_keys_do_not_crash_raw_serialization(self, mock_writer):
+        """Reviewer's PR-24 repro: a malformed sender ships a dict
+        with non-string keys (int, None, tuple). Without the
+        isinstance guard in _redact, `.lower()` would crash with
+        AttributeError. And tuple keys would crash json.dumps
+        regardless. The row must still record without crashing —
+        non-string keys are dropped from the raw column, well-formed
+        string keys survive and get redacted normally."""
+        tracker = UCPAnalyticsTracker(
+            project_id="test",
+            include_signals_raw=True,
+        )
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            response_body={
+                "id": "chk_123",
+                "signals": {
+                    42: "smuggled-via-int-key",
+                    None: "smuggled-via-none-key",
+                    ("tuple",): "smuggled-via-tuple-key",
+                    "dev.ucp.buyer_ip": "192.0.2.1",
+                },
+            },
+        )
+        # The row was recorded (no crash).
+        mock_writer.enqueue.assert_awaited_once()
+        # Raw column populated with the string-keyed entries only.
+        raw = json.loads(event.signals_json)
+        assert "dev.ucp.buyer_ip" in raw
+        # Documented PII signal value redacted.
+        assert raw["dev.ucp.buyer_ip"] == "[REDACTED]"
+        # Non-string-keyed entries dropped — their smuggled values
+        # never reach the column.
+        row_json = json.dumps(event.to_bq_row())
+        assert "smuggled-via-int-key" not in row_json
+        assert "smuggled-via-none-key" not in row_json
+        assert "smuggled-via-tuple-key" not in row_json
+
+    async def test_only_non_string_keys_omits_raw_column(self, mock_writer):
+        """A signals dict with ONLY non-string keys produces no raw
+        column (nothing serializable survives the filter). Safe-
+        default columns reflect the original dict's emptiness —
+        signals_present True (we observed the delivery), but
+        signals_keys_json absent (no string keys to list) and
+        signals_json absent."""
+        tracker = UCPAnalyticsTracker(
+            project_id="test",
+            include_signals_raw=True,
+        )
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            response_body={
+                "id": "chk_123",
+                "signals": {42: "x", None: "y"},
+            },
+        )
+        # Delivery observed but no serializable keys.
+        assert event.signals_present is True
+        assert event.signals_keys_json is None
+        assert event.signals_json is None
+
+    async def test_non_string_keys_in_ap2_raw_capture(self, mock_writer):
+        """Parallel reviewer-repro fix on the A4 side: a malformed
+        sender shipping a non-string key inside body.ap2 must not
+        crash the raw AP2 capture path. Same isinstance guard +
+        string-key filter as signals."""
+        tracker = UCPAnalyticsTracker(
+            project_id="test",
+            include_ap2_raw=True,
+        )
+        event = await tracker.record_http(
+            method="POST",
+            path="/checkout-sessions",
+            status_code=201,
+            response_body={
+                "id": "chk_123",
+                "ap2": {
+                    42: "smuggled-int",
+                    ("tuple",): "smuggled-tuple",
+                    "merchant_authorization": "eyJhbGciOiJFUzI1NiJ9..sig",
+                },
+            },
+        )
+        mock_writer.enqueue.assert_awaited_once()
+        raw = json.loads(event.ap2_mandate_raw_json)
+        # String-keyed credential still redacted.
+        assert raw["merchant_authorization"] == "[REDACTED]"
+        # Non-string-keyed smuggled entries dropped.
+        row_json = json.dumps(event.to_bq_row())
+        assert "smuggled-int" not in row_json
+        assert "smuggled-tuple" not in row_json
+
+
 class TestPIIRedaction:
     async def test_redacts_configured_fields(self, mock_writer):
         tracker = UCPAnalyticsTracker(
@@ -1497,6 +1811,48 @@ class TestPIIRedaction:
 
         # The event should be recorded (no crash)
         mock_writer.enqueue.assert_awaited_once()
+
+    def test_redact_handles_non_string_dict_keys(self):
+        """`_redact` is dict-recursive and reads `k.lower()` on every
+        key. Non-string keys (int / None / tuple) raised
+        AttributeError before this fix. After: non-string keys are
+        passed through unchanged (they can't match pii_fields, which
+        holds strings) — the recursion only redacts string-key
+        values that match. Verified at the unit level so any future
+        caller that hands `_redact` a non-string-key dict (Pydantic
+        models, framework-serialized structures, etc.) doesn't
+        crash."""
+        tracker = UCPAnalyticsTracker(project_id="test", redact_pii=True)
+        # All three flavors of non-string keys plus a real string
+        # key that should still get redacted.
+        result = tracker._redact(
+            {
+                42: "smuggled-int",
+                None: "smuggled-none",
+                ("a", "b"): "smuggled-tuple",
+                "email": "leaked@example.com",
+            }
+        )
+        # No crash. The string-keyed PII field is redacted; non-
+        # string keys keep their values.
+        assert result == {
+            42: "smuggled-int",
+            None: "smuggled-none",
+            ("a", "b"): "smuggled-tuple",
+            "email": "[REDACTED]",
+        }
+
+    def test_redact_recurses_into_non_string_keyed_dict_values(self):
+        """The value side of a non-string-keyed entry should still
+        be walked recursively so nested string-keyed PII is caught."""
+        tracker = UCPAnalyticsTracker(project_id="test", redact_pii=True)
+        result = tracker._redact(
+            {
+                42: {"email": "nested@example.com", "ok": "fine"},
+            }
+        )
+        # Nested PII still redacted under the non-string key.
+        assert result[42] == {"email": "[REDACTED]", "ok": "fine"}
 
     async def test_redact_nested(self, mock_writer):
         tracker = UCPAnalyticsTracker(
