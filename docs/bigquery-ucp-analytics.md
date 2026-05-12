@@ -134,6 +134,12 @@ app = FastAPI()
 tracker = UCPAnalyticsTracker(
     project_id="my-gcp-project",
     app_name="flower_shop",
+    # Optional: widen webhook detection if the platform publishes a
+    # non-default URL (UCP `order.md` says the URL is platform-specific).
+    webhook_path_prefixes=["/events"],
+    # Optional: derive signature alg from JWK crv per UCP signatures.md.
+    # The callable returns the JWK dict for a given keyid.
+    jwk_lookup=my_jwks_cache.get,
 )
 app.add_middleware(UCPAnalyticsMiddleware, tracker=tracker)
 
@@ -145,12 +151,21 @@ async def shutdown():
 **How it works:**
 
 1. The middleware checks if the request path matches a UCP operation
-   (`/checkout-sessions`, `/carts`, `/.well-known/ucp`, `/orders`, `/identity`, `/webhooks`)
+   (`/checkout-sessions`, `/carts`, `/.well-known/ucp`, `/orders`, `/identity`,
+   `/oauth2`, `/webhooks`, the OAuth/OIDC discovery endpoints), OR if the
+   request carries the Standard Webhooks header pair (`Webhook-Id` +
+   `Webhook-Timestamp`) for header-based webhook detection on
+   platform-specific URLs. Operator-configured `webhook_path_prefixes` on
+   the tracker (e.g. `/events`, `/ucp-events`, `/hooks`) widen this set.
 2. Reads the request body (for POST/PUT/PATCH)
 3. Lets the handler execute normally and measures latency
 4. Reads the response body
-5. Passes both to `UCPAnalyticsTracker.record_http()` as a fire-and-forget task, registered on the tracker so `tracker.close()` drains in-flight tasks before flushing
-   - For webhook paths, the tracker uses the **request body** (order payload) for classification and field extraction, since the response is just an ack
+5. Passes both to `UCPAnalyticsTracker.record_http()` as a fire-and-forget
+   task, registered on the tracker so `tracker.close()` drains in-flight
+   tasks before flushing. Multi-line `WWW-Authenticate` headers are merged
+   (RFC 7235 §4.1) so Bearer challenges survive `dict()` collapse.
+   - For webhook paths, the tracker uses the **request body** (order payload)
+     for classification and field extraction, since the response is just an ack
 6. Non-UCP paths pass through with zero overhead
 
 > **Requires:** `pip install ucp-analytics[fastapi]`
@@ -319,9 +334,13 @@ await tracker.close()
 | `app_name` | `str` | `""` | Application name tag on every event |
 | `batch_size` | `int` | `50` | Flush to BigQuery every N events |
 | `auto_create_table` | `bool` | `True` | Create dataset + table on first write |
-| `redact_pii` | `bool` | `False` | Redact PII fields before writing |
-| `pii_fields` | `list[str]` | `["email", "phone", ...]` | Fields to redact when `redact_pii=True` |
+| `redact_pii` | `bool` | `False` | Recursively redact PII fields in bodies before extraction |
+| `pii_fields` | `list[str]` | `["email", "phone", ...]` | Override the redaction set. AP2 credential names (`merchant_authorization`, `checkout_mandate`) and documented PII signal keys (`dev.ucp.buyer_ip`, `dev.ucp.user_agent`) are always force-included regardless of operator config. |
 | `custom_metadata` | `dict[str, str]` | `None` | Static key-value pairs added as JSON to every event |
+| `webhook_path_prefixes` | `list[str]` | `None` | Additional path prefixes for order webhooks (per UCP `order.md`: *"The URL format is platform-specific"*). The Standard Webhooks header pair (`Webhook-Id` + `Webhook-Timestamp`) also triggers detection on unknown paths, suppressed on known UCP REST paths. |
+| `jwk_lookup` | `Callable[[str], Optional[Mapping]]` | `None` | Operator-provided keyid → JWK lookup. Used to derive `request_signature_alg` / `response_signature_alg` from the JWK's `crv` per UCP `signatures.md`. When absent, the alg columns stay NULL. |
+| `include_ap2_raw` | `bool` | `False` | Surface raw `body.ap2` into `ap2_mandate_raw_json` after `_redact`. Credential field names are scrubbed regardless of `redact_pii`. Default-off forensic capture. |
+| `include_signals_raw` | `bool` | `False` | Surface raw `body.signals` into `signals_json` after `_redact`. Documented PII signal keys scrubbed regardless of `redact_pii`. Default-off forensic capture. |
 
 ### `AsyncBigQueryWriter`
 
@@ -368,7 +387,8 @@ clustering on `event_type`, `checkout_session_id`, `merchant_host`.
 |---|---|---|---|
 | `app_name` | `STRING` | `NULLABLE` | Application identifier (e.g., `"flower_shop"`) |
 | `merchant_host` | `STRING` | `NULLABLE` | Merchant endpoint hostname |
-| `platform_profile_url` | `STRING` | `NULLABLE` | `UCP-Agent` request header value |
+| `platform_profile_url` | `STRING` | `NULLABLE` | Raw `UCP-Agent` request header (legacy; superseded by `ucp_agent_profile_url`) |
+| `ucp_agent_profile_url` | `STRING` | `NULLABLE` | `profile` member parsed out of the RFC 8941 `UCP-Agent` Structured Field Dictionary; direction-neutral |
 | `transport` | `STRING` | `NULLABLE` | Transport protocol: `rest`, `mcp`, `a2a`, `embedded` |
 
 ### HTTP
@@ -381,6 +401,17 @@ clustering on `event_type`, `checkout_session_id`, `merchant_host`.
 | `idempotency_key` | `STRING` | `NULLABLE` | `Idempotency-Key` request header |
 | `request_id` | `STRING` | `NULLABLE` | `Request-Id` request header |
 
+### Request-Body Context
+
+Captured from `body.context` on requests carrying a UCP Context object (e.g. checkout-create, catalog-search). Survives the request/response merge.
+
+| Field | Type | Mode | Description |
+|---|---|---|---|
+| `context_intent` | `STRING` | `NULLABLE` | Buyer intent / agent task |
+| `context_language` | `STRING` | `NULLABLE` | BCP 47 language tag |
+| `context_currency` | `STRING` | `NULLABLE` | ISO 4217 currency code |
+| `context_eligibility_json` | `JSON` | `NULLABLE` | Eligibility claim payload |
+
 ### Checkout
 
 | Field | Type | Mode | Description |
@@ -388,22 +419,23 @@ clustering on `event_type`, `checkout_session_id`, `merchant_host`.
 | `checkout_session_id` | `STRING` | `NULLABLE` | Checkout session identifier |
 | `checkout_status` | `STRING` | `NULLABLE` | Session state: `incomplete`, `requires_escalation`, `ready_for_complete`, `complete_in_progress`, `completed`, `canceled`. Only populated for checkout responses (not orders or carts). |
 | `order_id` | `STRING` | `NULLABLE` | Order ID (from `checkout.order.id` or direct) |
+| `order_label` | `STRING` | `NULLABLE` | Optional business-set order label per `order.json` (surfaced only on order-shaped bodies carrying `checkout_id`) |
 
 ### Financial (Minor Units)
 
-All amounts are in **minor currency units** (cents for USD). The seven total types
-are defined by the UCP spec:
+All amounts are in **minor currency units** (cents for USD), signed per `signed_amount.json` (negative for refunds). The seven well-known total types from the UCP spec map to scalar columns; each is `SUM(amount)` over all entries of the matching type (so split state+local tax rows or multi-line discounts accumulate correctly). Business-defined types (per `total.json`'s open vocabulary) are preserved verbatim in `totals_json`.
 
 | Field | Type | Mode | Description |
 |---|---|---|---|
 | `currency` | `STRING` | `NULLABLE` | ISO 4217 currency code (e.g., `USD`) |
-| `items_discount_amount` | `INTEGER` | `NULLABLE` | From `totals[type=items_discount]` — per-item discounts |
-| `subtotal_amount` | `INTEGER` | `NULLABLE` | From `totals[type=subtotal]` — sum of line items |
-| `discount_amount` | `INTEGER` | `NULLABLE` | From `totals[type=discount]` — order-level discount |
-| `fulfillment_amount` | `INTEGER` | `NULLABLE` | From `totals[type=fulfillment]` — shipping / delivery |
-| `tax_amount` | `INTEGER` | `NULLABLE` | From `totals[type=tax]` |
-| `fee_amount` | `INTEGER` | `NULLABLE` | From `totals[type=fee]` — platform / service fees |
-| `total_amount` | `INTEGER` | `NULLABLE` | From `totals[type=total]` — final charged amount |
+| `items_discount_amount` | `INTEGER` | `NULLABLE` | `SUM(totals[type=items_discount].amount)` |
+| `subtotal_amount` | `INTEGER` | `NULLABLE` | `SUM(totals[type=subtotal].amount)` |
+| `discount_amount` | `INTEGER` | `NULLABLE` | `SUM(totals[type=discount].amount)` |
+| `fulfillment_amount` | `INTEGER` | `NULLABLE` | `SUM(totals[type=fulfillment].amount)` |
+| `tax_amount` | `INTEGER` | `NULLABLE` | `SUM(totals[type=tax].amount)` |
+| `fee_amount` | `INTEGER` | `NULLABLE` | `SUM(totals[type=fee].amount)` |
+| `total_amount` | `INTEGER` | `NULLABLE` | `SUM(totals[type=total].amount)` |
+| `totals_json` | `JSON` | `NULLABLE` | Full ordered totals array verbatim (duplicates, `display_text`, `lines[]`, business-defined types) |
 
 ### Line Items
 
@@ -419,6 +451,7 @@ are defined by the UCP spec:
 | `payment_handler_id` | `STRING` | `NULLABLE` | Payment handler reverse-domain ID (e.g., `com.stripe.payment`) |
 | `payment_instrument_type` | `STRING` | `NULLABLE` | Instrument type: `card`, `bank_transfer`, etc. |
 | `payment_brand` | `STRING` | `NULLABLE` | Card brand: `Visa`, `Mastercard`, etc. |
+| `payment_available_instruments_json` | `JSON` | `NULLABLE` | Per-handler `available_instruments[]` from `body.ucp.payment_handlers[*]` (all handlers preserved with per-handler arrays intact) |
 
 ### Capabilities
 
@@ -462,14 +495,99 @@ are defined by the UCP spec:
 |---|---|---|---|
 | `permalink_url` | `STRING` | `NULLABLE` | Order status page URL (from `order.permalink_url`) |
 
+### Order Lifecycle (c5c6139 schema)
+
+At UCP `c5c6139`, `order.json` no longer carries a top-level `status` — lifecycle lives in two append-only arrays. `latest_*` scalars are picked by RFC 3339-parsed `occurred_at` (mixed `Z` / `±HH:MM` offsets compared as instants; naive timestamps rejected).
+
+| Field | Type | Mode | Description |
+|---|---|---|---|
+| `fulfillment_events_json` | `JSON` | `NULLABLE` | Full ordered `fulfillment.events[]` (shipment log) |
+| `adjustments_json` | `JSON` | `NULLABLE` | Full ordered `adjustments[]` (refunds / returns / disputes / cancellations) |
+| `latest_fulfillment_event_type` | `STRING` | `NULLABLE` | Type of the latest fulfillment event (`processing`, `shipped`, `in_transit`, `delivered`, `failed_attempt`, `canceled`, `undeliverable`, `returned_to_sender`) |
+| `latest_fulfillment_event_at` | `TIMESTAMP` | `NULLABLE` | `occurred_at` of the latest fulfillment event |
+| `latest_adjustment_type` | `STRING` | `NULLABLE` | Type of the latest adjustment (`refund`, `return`, `cancellation`, etc.) |
+| `latest_adjustment_status` | `STRING` | `NULLABLE` | `pending` / `completed` / `failed` |
+| `latest_adjustment_at` | `TIMESTAMP` | `NULLABLE` | `occurred_at` of the latest adjustment |
+
+### HTTP Message Signing (RFC 9421 + UCP `signatures.md`)
+
+The BOOL columns are three-state: NULL means "headers never observed" (direct API caller didn't pass the corresponding side), FALSE means "observed and unsigned", TRUE means "complete Signature-Input + Signature pair present".
+
+| Field | Type | Mode | Description |
+|---|---|---|---|
+| `request_signed` | `BOOL` | `NULLABLE` | Both `Signature-Input` and `Signature` present on request |
+| `response_signed` | `BOOL` | `NULLABLE` | Same on response side |
+| `request_signature_keyid` | `STRING` | `NULLABLE` | First `keyid` parsed from `Signature-Input` (captured even on half-signed for forensics) |
+| `response_signature_keyid` | `STRING` | `NULLABLE` | Same on response side |
+| `request_signature_alg` | `STRING` | `NULLABLE` | JWA name (`ES256` / `ES384`) derived from JWK `crv` via `jwk_lookup`; populated only when `request_signed=True` |
+| `response_signature_alg` | `STRING` | `NULLABLE` | Same on response side |
+
+### Webhook Metadata (Standard Webhooks)
+
+Scoped to webhook flows only — stamping these headers on a non-webhook UCP REST request is rejected.
+
+| Field | Type | Mode | Description |
+|---|---|---|---|
+| `webhook_id` | `STRING` | `NULLABLE` | `Webhook-Id` request header (unique event ID) |
+| `webhook_timestamp` | `TIMESTAMP` | `NULLABLE` | `Webhook-Timestamp` parsed from Unix seconds → ISO 8601 UTC |
+
+### WWW-Authenticate Bearer Challenge (RFC 7235 / 6750 / 9728)
+
+Surfaced on response side; parsed RFC-faithfully across multi-challenge / multi-line / BWS-around-`=` / token-form-value / hyphenated-scheme cases.
+
+| Field | Type | Mode | Description |
+|---|---|---|---|
+| `auth_challenge_realm` | `STRING` | `NULLABLE` | Bearer challenge `realm` |
+| `auth_challenge_error` | `STRING` | `NULLABLE` | Bearer challenge `error` (`invalid_token` / `insufficient_scope` / ...) |
+| `auth_challenge_scope` | `STRING` | `NULLABLE` | Bearer challenge `scope` |
+| `auth_challenge_resource_metadata` | `STRING` | `NULLABLE` | RFC 9728 `resource_metadata` pointer |
+
+### Embedded Checkout (server-observable slice)
+
+Runtime postMessage events (`ec.totals.change`, link delegation acceptance, reauth, cart binding) are **deferred** — they live in the iframe / host browser and need separate instrumentation that doesn't exist in this library.
+
+| Field | Type | Mode | Description |
+|---|---|---|---|
+| `embedded_delegations_json` | `JSON` | `NULLABLE` | Union of `delegate[]` across all embedded services in `/.well-known/ucp` discovery responses |
+| `embedded_color_schemes_json` | `JSON` | `NULLABLE` | Union of `color_scheme[]` across all embedded services |
+| `embedded_ec_color_scheme` | `STRING` | `NULLABLE` | `ec_color_scheme` URL query parameter (parsed from `url` or `path`) |
+
+### AP2 Mandates + Buyer Consent
+
+Safe-by-default columns observe non-PII metadata only. The raw column is opt-in via `include_ap2_raw=True`; credential field names are force-included in `pii_fields` so values are always scrubbed before serialization.
+
+| Field | Type | Mode | Description |
+|---|---|---|---|
+| `ap2_mandate_present` | `BOOL` | `NULLABLE` | Whether `body.ap2` carries any mandate field |
+| `ap2_mandate_keys_json` | `JSON` | `NULLABLE` | Names of present mandate fields (`merchant_authorization` / `checkout_mandate`) |
+| `ap2_mandate_metadata_json` | `JSON` | `NULLABLE` | Per-mandate JOSE header (`kid` / `alg` / `typ`) + SHA-256 hex of the credential string. **NEVER** the payload (credential body) or disclosures. |
+| `buyer_consent_json` | `JSON` | `NULLABLE` | Whitelisted boolean consent flags from `body.buyer.consent` only (`analytics` / `preferences` / `marketing` / `sale_of_data`). **NEVER** the parent buyer object's PII. |
+| `ap2_mandate_raw_json` | `JSON` | `NULLABLE` | (Opt-in) Original `body.ap2` after `_redact`. Credential strings always scrubbed. |
+
+### Authorization Signals
+
+Safe-by-default columns capture only key names. The raw column is opt-in via `include_signals_raw=True`; documented PII signal keys (`dev.ucp.buyer_ip`, `dev.ucp.user_agent`) force-included in `pii_fields`.
+
+| Field | Type | Mode | Description |
+|---|---|---|---|
+| `signals_present` | `BOOL` | `NULLABLE` | Whether `body.signals` carries any entries |
+| `signals_keys_json` | `JSON` | `NULLABLE` | Names of signal keys (reverse-domain identifiers); **NEVER** the values |
+| `signals_json` | `JSON` | `NULLABLE` | (Opt-in) Original `body.signals` after `_redact`. Documented PII signal values always scrubbed; operators extend redaction via `pii_fields` for additional reverse-domain PII signals. |
+
 ### Errors & Messages
 
 | Field | Type | Mode | Description |
 |---|---|---|---|
-| `error_code` | `STRING` | `NULLABLE` | Error code from server messages |
-| `error_message` | `STRING` | `NULLABLE` | Error description |
-| `error_severity` | `STRING` | `NULLABLE` | Error severity level |
-| `messages_json` | `JSON` | `NULLABLE` | Full messages array from response |
+| `error_code` | `STRING` | `NULLABLE` | First error's `code` from `messages[]` |
+| `error_message` | `STRING` | `NULLABLE` | First error's `content` |
+| `error_severity` | `STRING` | `NULLABLE` | First error's `severity` (`recoverable`/`escalation`/`fatal`) |
+| `messages_json` | `JSON` | `NULLABLE` | Full `messages[]` array verbatim |
+| `message_info_codes_json` | `JSON` | `NULLABLE` | Dedup'd, order-preserved list of info-severity codes |
+| `message_warning_codes_json` | `JSON` | `NULLABLE` | Dedup'd, order-preserved list of warning-severity codes |
+| `identity_optional_present` | `BOOL` | `NULLABLE` | Three-state: TRUE iff `identity_optional` is in the info codes, FALSE iff info codes observed but it's not, NULL iff no info codes |
+| `eligibility_accepted_present` | `BOOL` | `NULLABLE` | Three-state eligibility outcome — denominator is "any eligibility outcome code observed" (cross-severity capture) |
+| `eligibility_not_accepted_present` | `BOOL` | `NULLABLE` | Same denominator |
+| `eligibility_invalid_present` | `BOOL` | `NULLABLE` | Same denominator |
 
 ### Performance
 
@@ -515,15 +633,17 @@ classifier handles all UCP resource types:
 | Event Type | Trigger | Description |
 |---|---|---|
 | `order_created` | `POST /orders` | Order created |
-| `order_updated` | `GET /orders/{id}` or generic webhook | Order status polled (generic) |
-| `order_shipped` | Shipping simulation or webhook (status=`shipped`) | Order shipped (fulfillment event) |
-| `order_delivered` | `GET /orders/{id}` (status=`delivered`) or webhook | Order delivered to buyer |
-| `order_returned` | `GET /orders/{id}` (status=`returned`) or webhook | Order returned by buyer |
-| `order_canceled` | `GET /orders/{id}` (status=`canceled`) or webhook | Order canceled |
+| `order_get` | `GET /orders/{id}` (no lifecycle in body) | Read-only poll of order state; distinct from `order_updated` |
+| `order_updated` | `PUT /orders/{id}` (no lifecycle in body) | REST-driven order mutation |
+| `order_shipped` | Latest `fulfillment.events[].type` is `shipped` / `in_transit` | Shipment in motion |
+| `order_delivered` | Latest `fulfillment.events[].type` is `delivered` | Delivery confirmed |
+| `order_returned` | Latest `fulfillment.events[].type` is `returned_to_sender` or `adjustments[].type` is `refund`/`return` | Return processed |
+| `order_canceled` | Latest `fulfillment.events[].type` is `canceled`/`undeliverable` or `adjustments[].type` is `cancellation` | Order canceled |
+| `order_webhook_received` | Webhook delivery without recognizable lifecycle status | Distinct from `order_updated` (REST PUT mutation); preserves webhook-vs-REST taxonomy |
 
-Webhook paths include both the upstream partner format (`POST /webhooks/partners/{id}/events/order`,
-classified by the order status in the **request** body) and legacy paths (`/webhooks/order-delivered`,
-etc.). Webhook 4xx/5xx responses classify as `error`.
+**Lifecycle derivation (c5c6139):** At UCP `c5c6139` the order schema dropped its top-level `status`. Lifecycle derives from `fulfillment.events[]` (latest by RFC 3339 `occurred_at`) → `adjustments[]` → legacy top-level `status` for pre-c5c6139 senders. Lifecycle wins on either GET or PUT — a GET that returns a `delivered` fulfillment event still classifies as `order_delivered`.
+
+**Webhook detection:** Two signals — path matches `/webhook(s)` (default) or operator-configured `webhook_path_prefixes`, OR Standard Webhooks header pair (`Webhook-Id` + `Webhook-Timestamp`) on an unknown URL. Header-based detection is suppressed on known UCP REST paths so stamped headers can't override URL semantics. Webhook 4xx/5xx responses classify as `error`. Legacy URL-segment fallbacks (`/webhooks/order-delivered` etc.) retained for back-compat with senders that don't include status in body — body-driven derivation takes precedence.
 
 ### Discovery & Capability Events
 
@@ -536,9 +656,9 @@ etc.). Webhook 4xx/5xx responses classify as `error`.
 
 | Event Type | Trigger | Description |
 |---|---|---|
-| `identity_link_initiated` | `POST /identity` or `/oauth` | Identity linking started |
-| `identity_link_completed` | `GET /identity/callback` or `/oauth/callback` | Identity linked via OAuth callback |
-| `identity_link_revoked` | `POST /identity/revoke` or `DELETE /identity/*` | Identity link removed |
+| `identity_link_initiated` | `POST /identity`, `/oauth2/authorize`, or any of the OAuth/OIDC metadata discovery endpoints (`/.well-known/oauth-authorization-server`, `/.well-known/openid-configuration`, `/.well-known/oauth-protected-resource`) | Identity linking started |
+| `identity_link_completed` | `GET /identity/callback`, `/oauth2/token` | Identity linked via OAuth callback / token exchange |
+| `identity_link_revoked` | `POST /identity/revoke`, `/oauth2/revoke`, `DELETE /identity/*` | Identity link removed |
 
 ### Payment Events
 
@@ -566,31 +686,68 @@ A `checkout_session_completed` event row in BigQuery:
 {
   "event_id": "670cf848-070c-4a2b-b8e1-2c4f1e8d3a5b",
   "event_type": "checkout_session_completed",
-  "timestamp": "2026-02-19T10:30:00.000Z",
+  "timestamp": "2026-05-12T10:30:00.000Z",
   "app_name": "flower_shop",
   "merchant_host": "flower-shop.example.com",
+  "transport": "rest",
+  "ucp_agent_profile_url": "https://platform.example/profile",
   "http_method": "POST",
   "http_path": "/checkout-sessions/chk_abc123/complete",
   "http_status_code": 200,
   "checkout_session_id": "chk_abc123",
   "checkout_status": "completed",
   "order_id": "order_xyz789",
+  "order_label": "ORD-2026-00042",
   "currency": "USD",
   "subtotal_amount": 7997,
   "fulfillment_amount": 599,
   "tax_amount": 700,
   "total_amount": 8796,
   "discount_amount": 500,
+  "totals_json": "[{\"type\":\"subtotal\",\"amount\":7997},{\"type\":\"tax\",\"amount\":500,\"display_text\":\"state tax\"},{\"type\":\"tax\",\"amount\":200,\"display_text\":\"local tax\"},{\"type\":\"fulfillment\",\"amount\":599},{\"type\":\"discount\",\"amount\":-500},{\"type\":\"total\",\"amount\":8796}]",
   "line_item_count": 3,
   "payment_handler_id": "com.stripe.payment",
   "payment_instrument_type": "card",
   "payment_brand": "Visa",
-  "ucp_version": "2026-01-11",
+  "ucp_version": "2026-05-06",
   "fulfillment_type": "shipping",
   "fulfillment_destination_country": "US",
   "discount_codes_json": "[\"FLOWERS10\"]",
   "permalink_url": "https://flower-shop.example.com/orders/order_xyz789",
+  "request_signed": true,
+  "response_signed": true,
+  "request_signature_keyid": "platform-key-2026",
+  "response_signature_keyid": "merchant-key-2026",
+  "request_signature_alg": "ES256",
+  "response_signature_alg": "ES256",
+  "context_intent": "buy a birthday gift",
+  "context_language": "en-US",
+  "context_currency": "USD",
+  "identity_optional_present": false,
   "latency_ms": 142.5
+}
+```
+
+A complementary `order_delivered` event from a webhook delivery looks like:
+
+```json
+{
+  "event_id": "8c1a3...",
+  "event_type": "order_delivered",
+  "timestamp": "2026-05-12T17:30:00.000Z",
+  "app_name": "flower_shop",
+  "http_method": "POST",
+  "http_path": "/hooks/abc-123",
+  "http_status_code": 200,
+  "webhook_id": "evt_42",
+  "webhook_timestamp": "2026-05-12T17:30:00+00:00",
+  "order_id": "order_xyz789",
+  "latest_fulfillment_event_type": "delivered",
+  "latest_fulfillment_event_at": "2026-05-12T17:00:00+00:00",
+  "fulfillment_events_json": "[{\"id\":\"fe_1\",\"occurred_at\":\"2026-05-10T08:00:00Z\",\"type\":\"shipped\",\"tracking_number\":\"1Z999\"},{\"id\":\"fe_2\",\"occurred_at\":\"2026-05-12T17:00:00+00:00\",\"type\":\"delivered\"}]",
+  "request_signed": true,
+  "request_signature_keyid": "platform-key-2026",
+  "request_signature_alg": "ES256"
 }
 ```
 
@@ -598,7 +755,7 @@ A `checkout_session_completed` event row in BigQuery:
 
 ## PII Redaction
 
-Enable PII redaction to automatically mask sensitive fields before they reach BigQuery:
+Enable PII redaction to mask sensitive fields before they reach BigQuery:
 
 ```python
 tracker = UCPAnalyticsTracker(
@@ -609,12 +766,45 @@ tracker = UCPAnalyticsTracker(
 )
 ```
 
-When enabled, any matching field in the request or response body is replaced
-with `"[REDACTED]"` before extraction. This applies recursively to nested objects
-and arrays.
+When enabled, any matching field (case-insensitive on key name) in the request
+or response body is replaced with `"[REDACTED]"` before extraction. This applies
+recursively to nested objects and arrays. Non-string dict keys (int / None /
+tuple) are handled gracefully — they can't match `pii_fields` but the value
+side is still walked for nested string-keyed PII.
 
 Default PII fields: `email`, `phone`, `first_name`, `last_name`, `phone_number`,
 `street_address`, `postal_code`.
+
+### Force-included PII keys
+
+Four documented PII keys are **always** redacted regardless of operator config
+so a custom `pii_fields` list cannot accidentally disable safety:
+
+| Key | Why force-included |
+|---|---|
+| `merchant_authorization` | AP2 detached JWS credential (RFC 7515 App F) |
+| `checkout_mandate` | AP2 SD-JWT+kb credential |
+| `dev.ucp.buyer_ip` | Documented PII signal per `signals.json` (IP address) |
+| `dev.ucp.user_agent` | Documented PII signal per `signals.json` (UA string) |
+
+### Opt-in raw capture (`include_ap2_raw`, `include_signals_raw`)
+
+Both `body.ap2` and `body.signals` carry sensitive data. Safe-default columns
+observe only non-PII metadata (presence flags, key names, JOSE headers,
+SHA-256 hashes). The full objects land in `ap2_mandate_raw_json` /
+`signals_json` only when the operator opts in:
+
+```python
+tracker = UCPAnalyticsTracker(
+    project_id="my-gcp-project",
+    include_ap2_raw=True,        # for forensic mandate inspection
+    include_signals_raw=True,    # for forensic signal inspection
+)
+```
+
+Raw capture **always** runs through `_redact`, regardless of `redact_pii`
+— credential and PII-signal values are scrubbed before serialization
+even when general PII redaction is off.
 
 ---
 
