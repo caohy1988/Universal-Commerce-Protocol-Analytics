@@ -52,9 +52,10 @@ cd Universal-Commerce-Protocol-Analytics
 uv sync --all-extras
 ```
 
-This project is intended to be read, run, and adapted from source. Copy the
-parts you need from `src/ucp_analytics/` into your own UCP service or agent,
-then trim the integration surfaces you do not use.
+This repository is intended to be read, run, and adapted from source. Run the
+demos against the checkout, then refactor what you keep into your own UCP
+service or agent — including renaming `ucp_analytics` imports to match your
+package layout.
 
 ## Quick Start
 

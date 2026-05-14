@@ -2,11 +2,11 @@
 
 ## Overview
 
-This plugin provides **structured commerce observability** for agents and merchants
-using the [Universal Commerce Protocol (UCP)](https://ucp.dev). It captures checkout
-sessions, cart operations, order lifecycle, payment flows, capability negotiation,
-and identity linking events into Google BigQuery for funnel analysis, error debugging,
-latency monitoring, and revenue attribution.
+This repository is a sample implementation of **structured commerce observability**
+for agents and merchants using the [Universal Commerce Protocol (UCP)](https://ucp.dev).
+It captures checkout sessions, cart operations, order lifecycle, payment flows,
+capability negotiation, and identity linking events into Google BigQuery for funnel
+analysis, error debugging, latency monitoring, and revenue attribution.
 
 Three integration points — pick any or combine:
 
