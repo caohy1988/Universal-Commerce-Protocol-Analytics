@@ -266,17 +266,21 @@ Universal-Commerce-Protocol-Analytics/
 ├── docs/
 │   ├── design_doc.md               # design document
 │   └── bigquery-ucp-analytics.md   # BigQuery schema + usage guide
+├── CODE_OF_CONDUCT.md              # community standards
+├── CONTRIBUTING.md                 # CLA + review process
+├── SECURITY.md                     # vulnerability reporting
+├── LICENSE                         # Apache 2.0 license text
 ├── pyproject.toml                  # build (hatchling) + uv extras + ruff/pytest config
 └── uv.lock                        # pinned dependencies
 ```
 
 ## Contributing
 
-We welcome community contributions. See the UCP
-[Contribution Guide](https://github.com/Universal-Commerce-Protocol/ucp/blob/main/CONTRIBUTING.md)
-for details.
+We welcome community contributions. See [CONTRIBUTING.md](CONTRIBUTING.md)
+for the Google CLA and pull request process, and
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community guidelines.
 
 ## License
 
-UCP is an open-source project under the
+This sample implementation is available under the
 [Apache License 2.0](LICENSE).

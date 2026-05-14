@@ -1,0 +1,29 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+*.so
+
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Local generated slide assets
+docs/slides/
+
+# Local workspace notes
+findings.md
+progress.md
+task_plan.md
+
+# macOS Finder metadata
+.DS_Store
+.DS_Store?
+._*
+
