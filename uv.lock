@@ -3059,12 +3059,6 @@ dependencies = [
 adk = [
     { name = "google-adk" },
 ]
-all = [
-    { name = "fastapi" },
-    { name = "google-adk" },
-    { name = "starlette" },
-    { name = "ucp-sdk" },
-]
 dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -3073,6 +3067,7 @@ dev = [
 fastapi = [
     { name = "fastapi" },
     { name = "starlette" },
+    { name = "uvicorn" },
 ]
 sdk = [
     { name = "ucp-sdk" },
@@ -3080,21 +3075,18 @@ sdk = [
 
 [package.metadata]
 requires-dist = [
-    { name = "fastapi", marker = "extra == 'all'", specifier = ">=0.110.0" },
     { name = "fastapi", marker = "extra == 'fastapi'", specifier = ">=0.110.0" },
     { name = "google-adk", marker = "extra == 'adk'", specifier = ">=1.0.0" },
-    { name = "google-adk", marker = "extra == 'all'", specifier = ">=1.0.0" },
     { name = "google-cloud-bigquery", specifier = ">=3.20.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
-    { name = "starlette", marker = "extra == 'all'", specifier = ">=0.36.0" },
     { name = "starlette", marker = "extra == 'fastapi'", specifier = ">=0.36.0" },
-    { name = "ucp-sdk", marker = "extra == 'all'", git = "https://github.com/Universal-Commerce-Protocol/python-sdk.git" },
     { name = "ucp-sdk", marker = "extra == 'sdk'", git = "https://github.com/Universal-Commerce-Protocol/python-sdk.git" },
+    { name = "uvicorn", marker = "extra == 'fastapi'", specifier = ">=0.27.0" },
 ]
-provides-extras = ["sdk", "fastapi", "adk", "all", "dev"]
+provides-extras = ["sdk", "fastapi", "adk", "dev"]
 
 [[package]]
 name = "ucp-sdk"
