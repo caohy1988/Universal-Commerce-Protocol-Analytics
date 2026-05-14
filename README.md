@@ -266,7 +266,7 @@ Universal-Commerce-Protocol-Analytics/
 ├── docs/
 │   ├── design_doc.md               # design document
 │   └── bigquery-ucp-analytics.md   # BigQuery schema + usage guide
-├── pyproject.toml                  # uv dev environment + ruff/pytest config
+├── pyproject.toml                  # build (hatchling) + uv extras + ruff/pytest config
 └── uv.lock                        # pinned dependencies
 ```
 

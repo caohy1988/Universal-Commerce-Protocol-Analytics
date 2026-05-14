@@ -1086,7 +1086,7 @@ uv run python examples/identity_payment_demo.py  # identity + payment
 
 ```bash
 gcloud auth application-default login
-uv sync --extra fastapi
+uv sync --all-extras
 # Edit PROJECT_ID in examples/bq_demo.py
 uv run python examples/bq_demo.py
 ```

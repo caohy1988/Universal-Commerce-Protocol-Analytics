@@ -123,8 +123,8 @@ class UCPAgentAnalyticsPlugin(BasePlugin):  # type: ignore[misc]
         if not _ADK_AVAILABLE:
             raise ImportError(
                 "google-adk is not installed. "
-                "Add google-adk to your environment; in this repo, run "
-                "`uv sync --all-extras`."
+                "Add `google-adk>=1.0.0` to your environment, "
+                "or in this checkout run `uv sync --all-extras`."
             )
         super().__init__(name="ucp_agent_analytics")
 
