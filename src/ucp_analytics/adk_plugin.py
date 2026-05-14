@@ -4,7 +4,7 @@ If the user is running an ADK-based commerce agent, this thin adapter
 wraps UCPAnalyticsTracker into ADK's BasePlugin interface so it can
 be registered on a Runner alongside the BigQuery Agent Analytics Plugin.
 
-Install with: pip install ucp-analytics[adk]
+In this repository, run `uv sync --all-extras` before using the ADK demo.
 
 Usage::
 
@@ -123,7 +123,8 @@ class UCPAgentAnalyticsPlugin(BasePlugin):  # type: ignore[misc]
         if not _ADK_AVAILABLE:
             raise ImportError(
                 "google-adk is not installed. "
-                "Install with: pip install ucp-analytics[adk]"
+                "Add `google-adk>=1.0.0` to your environment, "
+                "or in this checkout run `uv sync --all-extras`."
             )
         super().__init__(name="ucp_agent_analytics")
 

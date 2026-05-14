@@ -6,7 +6,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [0.2.0] — 2026-05-11
 
-Completes the alignment of the UCP analytics package with the UCP spec at
+Completes the alignment of the UCP analytics sample implementation with the UCP spec at
 [`c5c6139`](https://github.com/Universal-Commerce-Protocol/ucp/commit/c5c6139)
 (the identity-linking OAuth foundation merge). All concrete acceptance
 rows from issue

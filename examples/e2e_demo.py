@@ -14,8 +14,8 @@ The demo exercises the full UCP checkout happy path:
 Then prints the captured analytics events as a table.
 
 Run:
-    pip install fastapi uvicorn httpx
-    python e2e_demo.py
+    uv sync --all-extras
+    uv run python examples/e2e_demo.py
 
 No GCP credentials or BigQuery needed — uses SQLite locally.
 """
@@ -40,7 +40,7 @@ from fastapi.responses import JSONResponse
 # ==========================================================================
 # PART 0: Lightweight analytics (SQLite replacement for BigQuery)
 # ==========================================================================
-# This mirrors the real ucp_analytics package but writes to SQLite so the
+# This mirrors the reusable ucp_analytics sample modules but writes to SQLite so the
 # demo runs without GCP credentials.
 
 DB_PATH = "/tmp/ucp_analytics_demo.db"

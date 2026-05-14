@@ -6,10 +6,10 @@ record unrelated agent tools (e.g. weather, simulation, custom
 domain logic) as UCP traffic — corrupting the analytics dataset
 for operators who don't override `track_all_tools`.
 
-The `google.adk` package is an optional extra; the plugin module
+The `google.adk` dependency is optional for this sample; the plugin module
 defers to a stub `object` base class when ADK isn't installed, but
 the `_UCP_PATTERNS` attribute is always available so these
-classification-shape tests don't require the extra.
+classification-shape tests don't require ADK.
 """
 
 from __future__ import annotations

@@ -10,10 +10,10 @@
 ## Overview
 
 UCP defines the protocol for agentic commerce — but ships no observability.
-This package automatically captures checkout sessions, order lifecycle,
-payment flows, capability negotiation, and identity linking events into
-BigQuery for funnel analysis, error debugging, latency monitoring, and
-revenue attribution.
+This repository is a sample implementation that shows how to capture checkout
+sessions, order lifecycle, payment flows, capability negotiation, and identity
+linking events into BigQuery for funnel analysis, error debugging, latency
+monitoring, and revenue attribution.
 
 Three integration points — pick any or combine:
 
@@ -44,26 +44,18 @@ Three integration points — pick any or combine:
             merchant_host
 ```
 
-## Installation
-
-```bash
-# Core (tracker + HTTPX hook)
-pip install ucp-analytics
-
-# With FastAPI middleware
-pip install ucp-analytics[fastapi]
-
-# With Google ADK plugin adapter
-pip install ucp-analytics[adk]
-```
-
-Or install from source:
+## Use The Sample
 
 ```bash
 git clone https://github.com/haiyuan-eng-google/Universal-Commerce-Protocol-Analytics.git
 cd Universal-Commerce-Protocol-Analytics
-uv sync
+uv sync --all-extras
 ```
+
+This repository is intended to be read, run, and adapted from source. Run the
+demos against the checkout, then refactor what you keep into your own UCP
+service or agent — including renaming `ucp_analytics` imports to match your
+package layout.
 
 ## Quick Start
 
@@ -86,8 +78,8 @@ async def shutdown():
     await tracker.close()  # drains in-flight tasks, then flushes
 ```
 
-> **Note:** `UCPAnalyticsMiddleware` requires the `[fastapi]` extra.
-> The middleware is lazy-loaded so the core package works without starlette installed.
+> **Note:** `UCPAnalyticsMiddleware` uses FastAPI/Starlette. In this repo,
+> `uv sync --all-extras` prepares those demo dependencies.
 
 ### Agent / platform client (HTTPX)
 
@@ -274,7 +266,7 @@ Universal-Commerce-Protocol-Analytics/
 ├── docs/
 │   ├── design_doc.md               # design document
 │   └── bigquery-ucp-analytics.md   # BigQuery schema + usage guide
-├── pyproject.toml                  # hatchling + uv + ruff
+├── pyproject.toml                  # build (hatchling) + uv extras + ruff/pytest config
 └── uv.lock                        # pinned dependencies
 ```
 
