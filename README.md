@@ -266,6 +266,8 @@ Universal-Commerce-Protocol-Analytics/
 ├── docs/
 │   ├── design_doc.md               # design document
 │   └── bigquery-ucp-analytics.md   # BigQuery schema + usage guide
+├── .github/workflows/ci.yml        # CI: uv lock check + ruff + pytest (Py 3.10-3.13)
+├── .gitignore                      # standard Python / uv / macOS / workspace ignores
 ├── CODE_OF_CONDUCT.md              # community standards
 ├── CONTRIBUTING.md                 # CLA + review process
 ├── SECURITY.md                     # vulnerability reporting

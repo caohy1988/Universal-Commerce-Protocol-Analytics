@@ -28,6 +28,8 @@ Examples of unacceptable behavior by participants include:
 *   Public or private harassment
 *   Publishing others' private information, such as a physical or electronic
     address, without explicit permission
+*   Disrespecting the community's time by sending spam or other unsolicited
+    commercial messages
 *   Other conduct which could reasonably be considered inappropriate in a
     professional setting
 
@@ -69,13 +71,11 @@ dispute. If you are unable to resolve the matter for any reason, or if the
 behavior is threatening or harassing, report it. We are dedicated to providing
 an environment where participants feel welcome and safe.
 
-Reports should be directed to Haiyuan Cao, haiyuan@google.com, the Project
-Steward for Universal-Commerce-Protocol-Analytics. It is the Project Steward's
-duty to receive and address reported violations of the Code of Conduct. They
-will then work with a committee consisting of representatives from the Open
-Source Programs Office and the Google Open Source Strategy team. If for any
-reason you are uncomfortable reaching out to the Project Steward, please email
-opensource@google.com.
+Reports should be directed to opensource@google.com, the Project Steward(s)
+for Universal-Commerce-Protocol-Analytics. It is the Project Steward's duty
+to receive and address reported violations of the Code of Conduct. They will
+then work with a committee consisting of representatives from the Open Source
+Programs Office and the Google Open Source Strategy team.
 
 We will investigate every complaint, but you may not receive a direct response.
 We will use our discretion in determining when and how to follow up on reported

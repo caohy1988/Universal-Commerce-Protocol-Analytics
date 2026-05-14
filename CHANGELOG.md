@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file. The
 format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Infrastructure
+
+- Add canonical Apache 2.0 `LICENSE`, `CONTRIBUTING.md` (Google CLA template),
+  `CODE_OF_CONDUCT.md`, and `SECURITY.md` for Google OSS readiness.
+- Add `.gitignore` for Python / uv / macOS / workspace artifacts.
+- Add `.github/workflows/ci.yml`: matrix CI on Python 3.10-3.13 running
+  `uv lock --check`, `uv run ruff check .`, and `uv run pytest -q`. Actions
+  pinned to commit SHAs with `permissions: contents: read` at workflow root.
+- Add Apache 2.0 license headers to all tracked Python, SQL, TOML, and
+  workflow YAML files.
+
 ## [0.2.0] — 2026-05-11
 
 Completes the alignment of the UCP analytics sample implementation with the UCP spec at
