@@ -31,7 +31,7 @@
 
 The Universal Commerce Protocol (UCP) defines standardized APIs for agentic commerce — enabling AI agents to discover merchant capabilities, create checkout sessions, process payments, and manage orders. However, UCP ships with **no built-in observability**. Businesses and platforms have no structured way to track checkout conversion funnels, payment success rates, error patterns, or latency across the protocol surface.
 
-**UCP Analytics** is a new open-source package that automatically captures every UCP operation into BigQuery, providing structured commerce event tracking aligned with the UCP specification. It hooks into the HTTP transport layer (the primary UCP binding) via FastAPI middleware (merchant side) and HTTPX event hooks (agent/platform side), requiring **zero changes to existing UCP server or client code**.
+**UCP Analytics** is an open-source sample implementation that shows how to capture every UCP operation into BigQuery, providing structured commerce event tracking aligned with the UCP specification. It hooks into the HTTP transport layer (the primary UCP binding) via FastAPI middleware (merchant side) and HTTPX event hooks (agent/platform side), requiring **zero changes to existing UCP server or client code**.
 
 **Key outcomes:**
 1. Checkout funnel visibility from discovery to completion
@@ -118,9 +118,9 @@ Platform (Agent)                    Business (Merchant)
 
 ### 3.4 Lazy Loading and Optional Dependencies
 
-The core package depends only on `google-cloud-bigquery` and `httpx`. Optional integrations are lazy-loaded to avoid import errors:
+The core sample modules depend only on `google-cloud-bigquery` and `httpx`. Optional integrations are lazy-loaded to avoid import errors:
 
-- **FastAPI middleware:** `UCPAnalyticsMiddleware` is exposed via `__getattr__` in `__init__.py` and only imported when accessed, so the core package works without `starlette` installed.
+- **FastAPI middleware:** `UCPAnalyticsMiddleware` is exposed via `__getattr__` in `__init__.py` and only imported when accessed, so the core sample modules work without `starlette` installed.
 - **ADK plugin:** `adk_plugin.py` uses `try/except ImportError` around `google.adk` imports, falling back to `object` as the base class when ADK is not installed.
 
 ---
@@ -495,7 +495,7 @@ On first write, the writer lazily initializes the BigQuery client, creates datas
 
 Analytics recording is fire-and-forget: the middleware dispatches `tracker.record_http()` via `asyncio.create_task()` so it does not block the HTTP response. Each task is registered on the tracker via `tracker.register_pending_task()`, allowing `tracker.close()` to drain all in-flight tasks before flushing the buffer. This means the shutdown pattern is simply `await tracker.close()` — no need to reference the middleware instance (which is constructed internally by `app.add_middleware()` and not directly accessible). Response headers (including multi-value headers like `set-cookie`) are preserved using raw header passthrough.
 
-The middleware is lazy-loaded in `__init__.py` via `__getattr__`, so importing the core package does not require `starlette` to be installed.
+The middleware is lazy-loaded in `__init__.py` via `__getattr__`, so importing the core sample modules does not require `starlette` to be installed.
 
 ### 8.2 HTTPX Event Hook (Agent Client)
 

@@ -2,7 +2,7 @@
 
 Lives in its own module so the HTTPX hook can use it without dragging in
 the optional Starlette dependency that `middleware.py` imports at module
-load time. Private (`_headers`) — not part of the package's public API.
+load time. Private (`_headers`) — not part of the sample's public API.
 """
 
 from __future__ import annotations

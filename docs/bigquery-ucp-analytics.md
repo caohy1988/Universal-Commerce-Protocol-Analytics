@@ -64,7 +64,7 @@ pipeline, which batches rows and streams them into a partitioned, clustered BigQ
 | **GCP Project** | BigQuery API enabled |
 | **Auth (local)** | `gcloud auth application-default login` |
 | **Python** | 3.10+ |
-| **Package** | `pip install ucp-analytics` (core) |
+| **Source checkout** | Clone this repository and run the demos with `uv` |
 
 ### Enable BigQuery API
 
@@ -91,30 +91,17 @@ gcloud auth application-default login
 
 ---
 
-## Installation
-
-```bash
-# Core (tracker + HTTPX hook)
-pip install ucp-analytics
-
-# With FastAPI middleware support
-pip install ucp-analytics[fastapi]
-
-# With Google ADK plugin adapter
-pip install ucp-analytics[adk]
-
-# All extras
-pip install ucp-analytics[fastapi,adk]
-```
-
-Or install from source with [uv](https://docs.astral.sh/uv/):
+## Use The Sample
 
 ```bash
 git clone https://github.com/haiyuan-eng-google/Universal-Commerce-Protocol-Analytics.git
 cd Universal-Commerce-Protocol-Analytics
-uv sync              # core
-uv sync --all-extras # all extras
+uv sync --all-extras
 ```
+
+This repository is published as sample code. Run the demos from the checkout,
+then copy or adapt the relevant `src/ucp_analytics/` modules into your own UCP
+service or agent.
 
 ---
 
@@ -168,7 +155,8 @@ async def shutdown():
      for classification and field extraction, since the response is just an ack
 6. Non-UCP paths pass through with zero overhead
 
-> **Requires:** `pip install ucp-analytics[fastapi]`
+> **Requires:** FastAPI/Starlette in your runtime. In this repo, use
+> `uv sync --all-extras` before running the middleware demos.
 
 ### Integration 2: HTTPX Client Hook (Agent / Platform)
 
@@ -241,7 +229,8 @@ await plugin.close()
 8. Writes the event to BigQuery
 9. Non-UCP tools (e.g., `get_weather`) are silently skipped
 
-> **Requires:** `pip install ucp-analytics[adk]`
+> **Requires:** Google ADK in your runtime. In this repo, use
+> `uv sync --all-extras` before running the ADK demo.
 
 #### ADK Tool Name Mapping
 
@@ -1076,8 +1065,8 @@ covering every UCP event type (the canonical list lives in `src/ucp_analytics/ev
 ### Quick Start (No GCP)
 
 ```bash
-pip install fastapi uvicorn httpx
-python examples/e2e_demo.py
+uv sync --all-extras
+uv run python examples/e2e_demo.py
 ```
 
 ### Quick Start (BigQuery)

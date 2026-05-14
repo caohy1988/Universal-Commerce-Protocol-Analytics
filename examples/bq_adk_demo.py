@@ -11,7 +11,7 @@ events it cannot (identity, payment, capability, error, request).
 Requires:
     - gcloud auth application-default login
     - BigQuery API enabled
-    - pip install ucp-analytics[adk]
+    - uv sync --all-extras
 
 Usage:
     uv run python examples/bq_adk_demo.py

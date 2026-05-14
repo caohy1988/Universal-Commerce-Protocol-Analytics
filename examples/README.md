@@ -20,8 +20,8 @@ payment, and transport scenarios.
 ### Quick Start (No GCP)
 
 ```bash
-pip install fastapi uvicorn httpx
-python examples/e2e_demo.py
+uv sync --all-extras
+uv run python examples/e2e_demo.py
 ```
 
 ### Quick Start (BigQuery)
@@ -261,8 +261,8 @@ credentials. Uses SQLite instead of BigQuery so you can try UCP Analytics
 in seconds.
 
 ```bash
-pip install fastapi uvicorn httpx
-python examples/e2e_demo.py
+uv sync --all-extras
+uv run python examples/e2e_demo.py
 ```
 
 Runs the same checkout flow (discovery, create, update, discount, complete,
